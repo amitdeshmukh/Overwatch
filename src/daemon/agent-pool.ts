@@ -110,7 +110,6 @@ export class AgentPool {
 
     log.info("Spawning agent", {
       taskId: task.id,
-      role,
       title: task.title,
     });
 
