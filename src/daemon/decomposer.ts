@@ -1,10 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
 import { getSkillManifest } from "../skills/library.js";
 import type {
   DecomposedTask,
-  AgentRole,
   AgentModel,
 } from "../shared/types.js";
 
@@ -15,7 +13,6 @@ const DECOMPOSE_PROMPT_BASE = `You are a task decomposer. Given a user request, 
 For each subtask, provide:
 - title: short descriptive name
 - prompt: detailed instructions (include file paths, function names, acceptance criteria)
-- role: one of "lead", "backend-dev", "frontend-dev", "reviewer", "researcher", "db-admin", "tester"
 - model: one of "haiku", "sonnet", "opus" — choose based on task complexity:
   - "haiku": simple/mechanical tasks (file renaming, formatting, grep-and-replace, boilerplate generation, simple lookups)
   - "sonnet": standard implementation (most coding tasks, API endpoints, tests, refactoring, integrations)
@@ -29,30 +26,24 @@ Guidelines:
 - Be specific in prompts so the agent can work without further context
 - Include a final "review" or "integrate" task if the work needs synthesis
 - Default to "sonnet" when unsure. Use "haiku" aggressively for simple work to save cost. Reserve "opus" for tasks that genuinely need advanced reasoning.
-- Only assign skills that are genuinely useful for the subtask. Most subtasks need zero or one skill.
+- Assign skills that are genuinely useful for the subtask. Most subtasks need zero or one skill. If a specialized skill handles the task (like nanobanana for image generation), you MUST assign it.
 
 Respond ONLY with a JSON array. No markdown fences, no explanation.`;
 
 function buildDecomposePrompt(): string {
   const manifest = getSkillManifest();
-  if (manifest.length === 0) return DECOMPOSE_PROMPT_BASE;
 
-  const skillList = manifest
-    .map((s) => `- "${s.name}": ${s.description}`)
-    .join("\n");
+  let skillSection = "";
+  if (manifest.length > 0) {
+    const skillList = manifest
+      .map((s) => `- **${s.name}**: ${s.description}`)
+      .join("\n");
 
-  return `${DECOMPOSE_PROMPT_BASE}\n\nAvailable skills:\n${skillList}`;
+    skillSection = `\n\n## Available Skills (Inject these into subtasks when relevant)\n\nConsider using these specialized skills to handle specific task types:\n\n${skillList}`;
+  }
+
+  return DECOMPOSE_PROMPT_BASE + skillSection;
 }
-
-const VALID_ROLES = new Set<AgentRole>([
-  "lead",
-  "backend-dev",
-  "frontend-dev",
-  "reviewer",
-  "researcher",
-  "db-admin",
-  "tester",
-]);
 
 const VALID_MODELS = new Set<AgentModel>(["haiku", "sonnet", "opus"]);
 
@@ -79,7 +70,7 @@ export async function decompose(
     for await (const message of query({
       prompt,
       options: {
-        model: config.model,
+        model: "claude-opus-4-6",
         cwd: workdir,
         allowedTools: ["Read", "Glob", "Grep"],
         maxTurns: 3,
@@ -131,7 +122,7 @@ Please fix it and return ONLY a valid JSON array of subtasks with title, prompt,
     for await (const message of query({
       prompt: fixPrompt,
       options: {
-        model: config.model,
+        model: "claude-opus-4-6",
         cwd: workdir,
         allowedTools: [],
         maxTurns: 1,
@@ -164,15 +155,11 @@ function parseDecomposition(raw: string): DecomposedTask[] {
   }
 
   return parsed.map((item: Record<string, unknown>) => {
-    const role = String(item.role ?? "backend-dev");
     const model = String(item.model ?? "sonnet");
     return {
       title: String(item.title ?? "Untitled"),
       prompt: String(item.prompt ?? ""),
       exec_mode: "auto" as const,
-      role: (VALID_ROLES.has(role as AgentRole)
-        ? role
-        : "backend-dev") as AgentRole,
       model: (VALID_MODELS.has(model as AgentModel)
         ? model
         : "sonnet") as AgentModel,

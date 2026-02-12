@@ -98,7 +98,6 @@ export interface DecomposedTask {
   title: string;
   prompt: string;
   exec_mode: ExecMode;
-  role: AgentRole;
   model: AgentModel;
   deps: string[]; // titles of tasks this depends on
   skills: string[]; // skill names from skill library

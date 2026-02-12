@@ -40,13 +40,13 @@ export function loadSkill(role: AgentRole): string | null {
  * Prepare the workspace's .claude/skills/ directory for a specific agent.
  *
  * 1. Clears any existing .md files in the skills directory
- * 2. Writes the role's SKILL.md (persona)
+ * 2. Optionally writes the role's SKILL.md (persona) if role is provided
  * 3. For each library skill, copies its SKILL.md as `{skill-name}.md`
  *    and copies supporting directories (scripts/, templates/, etc.)
  */
 export function injectSkills(
   workdir: string,
-  role: AgentRole,
+  role: AgentRole | null = null,
   skills: string[] = []
 ): void {
   const skillsDir = resolve(workdir, ".claude", "skills");
@@ -66,12 +66,14 @@ export function injectSkills(
     // Directory might not exist yet
   }
 
-  // 1. Inject the role's skill (persona)
-  const roleContent = loadSkill(role);
-  if (roleContent) {
-    const targetPath = resolve(skillsDir, `${role}.md`);
-    writeFileSync(targetPath, roleContent, "utf-8");
-    log.debug("Injected role skill", { role, path: targetPath });
+  // 1. Optionally inject the role's skill (persona) if role is provided
+  if (role) {
+    const roleContent = loadSkill(role);
+    if (roleContent) {
+      const targetPath = resolve(skillsDir, `${role}.md`);
+      writeFileSync(targetPath, roleContent, "utf-8");
+      log.debug("Injected role skill", { role, path: targetPath });
+    }
   }
 
   // 2. Inject each library skill

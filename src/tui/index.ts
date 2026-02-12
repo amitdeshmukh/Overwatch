@@ -99,7 +99,7 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
     const task = getTask(taskId);
     if (!task) return null;
     const lines = [
-      `Status: ${task.status}  Role: ${task.agent_role ?? "—"}  Model: ${task.agent_model ?? "—"}`,
+      `Status: ${task.status}  Model: ${task.agent_model ?? "—"}`,
       "",
       "Prompt:",
       task.prompt,

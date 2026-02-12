@@ -16,7 +16,6 @@ import {
 import type {
   TaskRow,
   AgentHandle,
-  AgentRole,
   DaemonContext,
 } from "../shared/types.js";
 
@@ -93,16 +92,15 @@ export class AgentPool {
 
     this.ctx.taskDepths!.set(task.id, depth);
 
-    const role = (task.agent_role ?? "backend-dev") as AgentRole;
-    const mcpServers = resolveMcpServers(role);
+    const mcpServers = resolveMcpServers("backend-dev"); // Use neutral default for MCP
     const hooks = buildHooks(this.ctx, task.id);
 
     // Initialize task metadata for loop detection
     initializeTaskMetadata(task.id);
 
-    // Inject the role's skill and any library skills into the workspace
+    // Inject library skills into the workspace (no role persona)
     const taskSkills: string[] = JSON.parse(task.skills || "[]");
-    injectSkills(this.ctx.workdir, role, taskSkills);
+    injectSkills(this.ctx.workdir, null, taskSkills);
 
     const abortController = new AbortController();
     const timeout = setTimeout(() => {
@@ -161,14 +159,13 @@ export class AgentPool {
       return;
     }
 
-    const role = (task.agent_role ?? "backend-dev") as AgentRole;
-    const mcpServers = resolveMcpServers(role);
+    const mcpServers = resolveMcpServers("backend-dev"); // Use neutral default for MCP
     const hooks = buildHooks(this.ctx, task.id);
     const abortController = new AbortController();
 
-    // Re-inject role skill and library skills for resume
+    // Re-inject library skills for resume (no role persona)
     const taskSkills: string[] = JSON.parse(task.skills || "[]");
-    injectSkills(this.ctx.workdir, role, taskSkills);
+    injectSkills(this.ctx.workdir, null, taskSkills);
 
     const timeout = setTimeout(() => {
       abortController.abort();
@@ -215,8 +212,31 @@ export class AgentPool {
   ): Promise<string> {
     let result = "";
 
+    const systemInstructions = `IMPORTANT - Image Generation:
+
+FOR ANY IMAGE GENERATION TASK:
+✅ Use the "nanobanana" skill from your skills library
+✅ Nanobanana generates images via Google Gemini API
+✅ It handles all image creation - styles, variations, quality control
+
+DO NOT use:
+❌ PIL, matplotlib, or Python image libraries
+❌ Manual image creation code
+❌ Other external APIs - use nanobanana instead
+
+RESULT FORMAT - After generating images:
+- Nanobanana saves files to disk automatically
+- Reference file paths in your result: "./output.png"
+- DO NOT include image content or base64 data
+- Example: "Task completed. Image saved to ./anime_healing_class.png"
+
+The daemon will automatically:
+✅ Detect image references
+✅ Attach actual image files
+✅ Send images to the user`;
+
     for await (const message of query({
-      prompt: `Task: ${task.title}\n\n${task.prompt}`,
+      prompt: `${systemInstructions}\n\nTask: ${task.title}\n\n${task.prompt}`,
       options: {
         model: task.agent_model ?? config.model,
         cwd: this.ctx.workdir,

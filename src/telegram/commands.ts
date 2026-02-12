@@ -1,5 +1,6 @@
-import { readFileSync, existsSync } from "fs";
-import { resolve } from "path";
+import { readFileSync, existsSync, readdirSync } from "fs";
+import { resolve, join } from "path";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Context } from "grammy";
 import {
   listDaemons,
@@ -21,6 +22,13 @@ const log = createLogger("commands");
 
 /** Telegram message byte limit */
 const TG_MAX_BYTES = 4096;
+
+/**
+ * Escape special characters for Telegram MarkdownV2 format.
+ */
+function escapeMarkdownV2(text: string): string {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
+}
 
 /**
  * Extract images and text content from result.
@@ -95,16 +103,34 @@ function isLocalImageFile(filePath: string): boolean {
 }
 
 /**
- * Convert markdown to Telegram MarkdownV2 format for better rendering.
+ * Use Claude to summarize verbose output for Telegram (concise, ~300 chars max).
  */
-function formatForTelegram(text: string): string {
-  // Convert markdown headers (##, ###) to bold text
-  let result = text.replace(/^#{1,3}\s+(.+)$/gm, "*$1*");
+async function formatForTelegram(text: string): Promise<string> {
+  if (!text.trim()) return "";
 
-  // Convert bold markdown (**text**) to MarkdownV2 (*text*)
-  result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
+  // For short text, just return as-is
+  if (text.length < 200) return text;
 
-  return result;
+  try {
+    // Use Claude to intelligently summarize
+    for await (const message of query({
+      prompt: `Summarize this in 2-3 sentences for Telegram (max 300 chars). Be concise, skip fluff:\n\n${text}`,
+      options: {
+        model: "claude-opus-4-6",
+      },
+    })) {
+      if (message.type === "result" && "result" in message) {
+        const summary = (message as { result: string }).result;
+        return summary || text.substring(0, 300);
+      }
+    }
+  } catch (err) {
+    log.warn("Failed to summarize with Claude", { error: String(err) });
+  }
+
+  // Fallback: extract first paragraph
+  const firstPara = text.split(/\n\n+/)[0];
+  return firstPara.substring(0, 300);
 }
 
 /**
@@ -194,10 +220,10 @@ export const handleStatus = safe(async (ctx) => {
           : "⚠";
     const cost =
       d.total_cost_usd > 0
-        ? ` \\($${d.total_cost_usd.toFixed(2)}\\)`
+        ? ` \\($${escapeMarkdownV2(d.total_cost_usd.toFixed(2))}\\)`
         : "";
     const pid = d.pid ? ` \\[PID ${d.pid}\\]` : "";
-    return `${icon} *${d.name}* \\(${d.status}\\)${pid} — ${done}/${total} tasks${cost}`;
+    return `${icon} *${escapeMarkdownV2(d.name)}* \\(${d.status}\\)${pid} — ${done}/${total} tasks${cost}`;
   });
 
   await ctx.reply(safeTruncate(`*Daemons:*\n${lines.join("\n")}`), {
@@ -228,7 +254,7 @@ export const handleTree = safe(async (ctx) => {
 
   const tree = renderTree(root, 0);
   await ctx.reply(
-    safeTruncate(`*Task tree for "${name}":*\n\n${tree}`),
+    safeTruncate(`*Task tree for "${escapeMarkdownV2(name)}":*\n\n${tree}`),
     { parse_mode: "MarkdownV2" }
   );
 });
@@ -246,9 +272,8 @@ function renderTree(task: TaskRow, depth: number): string {
   const icon = statusSymbols[task.status as TaskStatus] ?? "⭕";
   let line = `${indent}${icon} *${task.title.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, "\\$&")}*`;
 
-  if (task.agent_role) {
-    const model = task.agent_model ? `/${task.agent_model}` : "";
-    line += ` \\(${task.agent_role}${model}\\)`;
+  if (task.agent_model) {
+    line += ` \\(${task.agent_model}\\)`;
   }
 
   const children = getChildTasks(task.id);
@@ -375,19 +400,33 @@ export const handleLogs = safe(async (ctx) => {
   }
 
   const result = task.result ?? "(no output yet)";
-  const { textContent, images } = extractContent(result);
+  let { textContent, images } = extractContent(result);
 
-  const formatted = formatForTelegram(textContent);
-  const header = `*Logs for "${task.title}" \\[${task.status}\\]*\n\n`;
-
-  // Send header + text first
-  if (formatted) {
-    await ctx.reply(safeTruncate(header + formatted), {
-      parse_mode: "MarkdownV2",
-    });
-  } else {
-    await ctx.reply(header, { parse_mode: "MarkdownV2" });
+  // Also search daemon's workspace for any image files
+  try {
+    const workspacePath = resolve(".overwatch/workspaces", task.daemon_id);
+    if (existsSync(workspacePath)) {
+      const files = readdirSync(workspacePath, { recursive: true });
+      for (const file of files) {
+        if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(String(file))) {
+          const imagePath = join(workspacePath, String(file));
+          if (!images.some((img) => img.url === imagePath)) {
+            images.push({ url: imagePath, isFile: true });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    log.warn("Failed to search workspace for images", { error: String(err) });
   }
+
+  const formatted = await formatForTelegram(textContent);
+  const header = `*Logs for "${escapeMarkdownV2(task.title)}" \\[${task.status}\\]*`;
+
+  // Send header + text
+  await ctx.reply(safeTruncate(header + "\n\n" + escapeMarkdownV2(formatted)), {
+    parse_mode: "MarkdownV2",
+  });
 
   // Send images if found
   for (const image of images) {

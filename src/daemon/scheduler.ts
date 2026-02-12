@@ -1,3 +1,5 @@
+import { existsSync, readdirSync } from "fs";
+import { resolve } from "path";
 import {
   getPendingTasks,
   getRunningTasks,
@@ -328,7 +330,6 @@ export class Scheduler {
           title: sub.title,
           prompt: sub.prompt,
           execMode: sub.exec_mode,
-          agentRole: sub.role,
           agentModel: sub.model,
           deps: [],
           skills: sub.skills,
@@ -383,12 +384,49 @@ export class Scheduler {
   }
 
   private onAgentComplete(taskId: string, result: string): void {
-    updateTaskResult(taskId, result);
+    // Auto-attach generated images to result
+    let finalResult = result;
+    try {
+      const task = getTask(taskId);
+      if (task) {
+        const workspacePath = resolve(
+          config.workspacesDir,
+          this.ctx.daemonId
+        );
+        if (existsSync(workspacePath)) {
+          const files = readdirSync(workspacePath, { recursive: true }) as string[];
+          const imageFiles: string[] = [];
+
+          for (const filename of files) {
+            if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(filename)) {
+              imageFiles.push(filename);
+            }
+          }
+
+          // Append image references if any found and not already in result
+          if (imageFiles.length > 0) {
+            const hasImages = /!\[|https?:\/\/.*\.(png|jpg|jpeg|gif|webp|bmp)/i.test(
+              result
+            );
+            if (!hasImages) {
+              finalResult += "\n\n## Generated Images:\n";
+              for (const img of imageFiles) {
+                finalResult += `![${img}](${img})\n`;
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      log.warn("Failed to auto-attach images", { error: String(err) });
+    }
+
+    updateTaskResult(taskId, finalResult);
     insertEvent({
       daemonId: this.ctx.daemonId,
       taskId,
       type: "task_done",
-      payload: { resultLength: result.length },
+      payload: { resultLength: finalResult.length },
     });
 
     const task = getTask(taskId);

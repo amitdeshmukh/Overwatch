@@ -1,6 +1,6 @@
 {
   "name": "overwatch",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Self-organizing AI task system with isolated agent sessions",
   "type": "module",
   "engines": {

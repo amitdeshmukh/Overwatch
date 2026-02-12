@@ -48,8 +48,8 @@ function TaskNode({ task, depth, selected, selectedTaskId }: TaskNodeProps): Rea
         { color: style.color, bold: task.status === "running" },
         task.title
       ),
-      task.agent_role
-        ? React.createElement(Text, { color: "gray" }, ` (${task.agent_role}${task.agent_model ? `/${task.agent_model}` : ""})`)
+      task.agent_model
+        ? React.createElement(Text, { color: "gray" }, ` (${task.agent_model})`)
         : null
     ),
     ...children.map((child) =>
