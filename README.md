@@ -174,6 +174,14 @@ npm run dev:daemon -- --name test --prompt "list files in the current directory"
 
 ## Production (systemd)
 
+Build the project first:
+
+```sh
+npm run build
+```
+
+Then set up systemd services:
+
 ```sh
 sudo bash scripts/setup.sh
 sudo systemctl enable --now overwatch-manager
