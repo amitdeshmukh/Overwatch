@@ -47,6 +47,7 @@ export class Scheduler {
   private paused = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveErrors = 0;
+  private pendingNotifications = 0;
 
   /** Callback to send a Telegram message to the user */
   sendMessage: ((text: string) => Promise<void>) | null = null;
@@ -180,7 +181,7 @@ export class Scheduler {
     }
 
     // 5. Check if all work is done
-    if (pending.length === 0 && this.pool.runningCount === 0) {
+    if (pending.length === 0 && this.pool.runningCount === 0 && this.pendingNotifications === 0) {
       const rootTask = getRootTask(daemonId);
       if (rootTask && rootTask.status === "done") {
         updateDaemonStatus(daemonId, "idle");
@@ -477,12 +478,15 @@ export class Scheduler {
   private async notify(message: string): Promise<void> {
     log.info("Notification", { message: message.slice(0, 200) });
     if (this.sendMessage) {
+      this.pendingNotifications++;
       try {
         await this.sendMessage(message);
       } catch (err) {
         log.error("Failed to send Telegram message", {
           error: String(err),
         });
+      } finally {
+        this.pendingNotifications--;
       }
     }
   }

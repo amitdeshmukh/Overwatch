@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, existsSync, readdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { mkdirSync, existsSync, readdirSync } from "node:fs";
+import { resolve, join, basename } from "node:path";
 import { parseArgs } from "node:util";
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import { getDb, closeDb } from "../db/index.js";
 import {
   getOrCreateDaemon,
@@ -64,19 +64,30 @@ async function formatForTelegram(raw: string): Promise<string> {
 }
 
 /**
- * Scan workspace for image files.
- * Safety net for when images exist but weren't referenced in the result.
+ * Recursively scan workspace for image files, skipping venv/.claude dirs.
  */
 function findWorkspaceImages(workdir: string): string[] {
   const images: string[] = [];
+  const SKIP = new Set(["venv", ".venv", "node_modules", ".claude", ".git", "__pycache__", ".env"]);
+
+  function scan(dir: string): void {
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (!SKIP.has(entry.name)) scan(join(dir, entry.name));
+        } else if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(entry.name)) {
+          images.push(join(dir, entry.name));
+        }
+      }
+    } catch {
+      // ignore permission errors etc.
+    }
+  }
+
   try {
     if (!existsSync(workdir)) return images;
-    const files = readdirSync(workdir);
-    for (const file of files) {
-      if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file)) {
-        images.push(join(workdir, file));
-      }
-    }
+    scan(workdir);
   } catch {
     // ignore
   }
@@ -182,8 +193,7 @@ async function main(): Promise<void> {
           if (sentImages.has(imgPath)) continue;
           sentImages.add(imgPath);
           try {
-            const fileBuffer = readFileSync(imgPath);
-            await bot.api.sendPhoto(ctx.chatId!, fileBuffer as unknown as string);
+            await bot.api.sendPhoto(ctx.chatId!, new InputFile(imgPath, basename(imgPath)));
           } catch (err) {
             log.warn("Failed to send image to Telegram", { path: imgPath, error: String(err) });
           }
