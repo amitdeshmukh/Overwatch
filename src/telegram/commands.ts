@@ -308,6 +308,28 @@ export const handleKill = safe(async (ctx) => {
   }
 });
 
+export const handleKillAll = safe(async (ctx) => {
+  const daemons = listDaemons();
+
+  if (daemons.length === 0) {
+    await ctx.reply("No daemons to kill.");
+    return;
+  }
+
+  const results: string[] = [];
+  for (const daemon of daemons) {
+    if (daemon.pid && isProcessAlive(daemon.pid)) {
+      sendCommand(daemon.name, "kill");
+      results.push(`${daemon.name}: kill signal sent (PID ${daemon.pid})`);
+    } else {
+      deleteDaemon(daemon.id);
+      results.push(`${daemon.name}: removed (dead)`);
+    }
+  }
+
+  await ctx.reply(`Killed ${daemons.length} daemon(s):\n${results.join("\n")}`);
+});
+
 export const handlePause = safe(async (ctx) => {
   const text = ctx.message?.text ?? "";
   const name = text.replace("/pause", "").trim();

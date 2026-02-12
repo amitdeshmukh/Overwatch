@@ -7,6 +7,7 @@ import {
   handleStatus,
   handleTree,
   handleKill,
+  handleKillAll,
   handlePause,
   handleResume,
   handleRetry,
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
   bot.command("status", handleStatus);
   bot.command("tree", handleTree);
   bot.command("kill", handleKill);
+  bot.command("killall", handleKillAll);
   bot.command("pause", handlePause);
   bot.command("resume", handleResume);
   bot.command("retry", handleRetry);
@@ -65,6 +67,7 @@ async function main(): Promise<void> {
         "/status — List all daemons\n" +
         "/tree <name> — Show task tree\n" +
         "/kill <name> — Stop a daemon\n" +
+        "/killall — Kill all daemons\n" +
         "/pause <name> — Pause a daemon\n" +
         "/resume <name> — Resume a daemon\n" +
         "/retry <task-id> — Retry a failed task\n" +
