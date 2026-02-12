@@ -1,5 +1,3 @@
-import { existsSync, readdirSync } from "fs";
-import { resolve } from "path";
 import {
   getPendingTasks,
   getRunningTasks,
@@ -26,10 +24,15 @@ import { AgentPool } from "./agent-pool.js";
 import { isBudgetExceeded } from "./budget.js";
 import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
+import {
+  parseTaskResult,
+} from "../shared/types.js";
 import type {
   DaemonContext,
   TaskRow,
   TaskStatus,
+  TaskResult,
+  TaskResultAggregate,
   CommandRow,
 } from "../shared/types.js";
 
@@ -181,9 +184,7 @@ export class Scheduler {
       const rootTask = getRootTask(daemonId);
       if (rootTask && rootTask.status === "done") {
         updateDaemonStatus(daemonId, "idle");
-        await this.notify(
-          `Project "${this.ctx.daemonName}" completed.\n\nResult:\n${(rootTask.result ?? "").slice(0, 3000)}`
-        );
+        // Child results already notified individually — no need to re-send
         this.stop();
       }
     }
@@ -384,55 +385,36 @@ export class Scheduler {
   }
 
   private onAgentComplete(taskId: string, result: string): void {
-    // Auto-attach generated images to result
-    let finalResult = result;
-    try {
-      const task = getTask(taskId);
-      if (task) {
-        const workspacePath = resolve(
-          config.workspacesDir,
-          this.ctx.daemonId
-        );
-        if (existsSync(workspacePath)) {
-          const files = readdirSync(workspacePath, { recursive: true }) as string[];
-          const imageFiles: string[] = [];
-
-          for (const filename of files) {
-            if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(filename)) {
-              imageFiles.push(filename);
-            }
-          }
-
-          // Append image references if any found and not already in result
-          if (imageFiles.length > 0) {
-            const hasImages = /!\[|https?:\/\/.*\.(png|jpg|jpeg|gif|webp|bmp)/i.test(
-              result
-            );
-            if (!hasImages) {
-              finalResult += "\n\n## Generated Images:\n";
-              for (const img of imageFiles) {
-                finalResult += `![${img}](${img})\n`;
-              }
-            }
-          }
-        }
-      }
-    } catch (err) {
-      log.warn("Failed to auto-attach images", { error: String(err) });
+    // Result is guaranteed to be TaskResult JSON (coerced in agent-pool)
+    const parsed = parseTaskResult(result);
+    if (!parsed) {
+      log.warn("Agent returned invalid TaskResult, this should not happen", { taskId });
     }
 
-    updateTaskResult(taskId, finalResult);
+    updateTaskResult(taskId, result);
     insertEvent({
       daemonId: this.ctx.daemonId,
       taskId,
       type: "task_done",
-      payload: { resultLength: finalResult.length },
+      payload: {
+        resultLength: result.length,
+        status: parsed?.status ?? "unknown",
+      },
     });
 
-    const task = getTask(taskId);
-    if (task?.parent_id) {
-      this.checkParentCompletion(task.parent_id);
-    }
+    // Send result to Telegram — wait for formatting + image send before proceeding to shutdown
+    this.notify(result).then(() => {
+      const task = getTask(taskId);
+      if (task?.parent_id) {
+        this.checkParentCompletion(task.parent_id);
+      }
+    }).catch(() => {
+      // Still complete parent even if notify fails
+      const task = getTask(taskId);
+      if (task?.parent_id) {
+        this.checkParentCompletion(task.parent_id);
+      }
+    });
   }
 
   private onAgentError(taskId: string, error: Error): void {
@@ -462,14 +444,28 @@ export class Scheduler {
   private checkParentCompletion(parentId: string): void {
     if (areChildrenDone(parentId)) {
       const children = getChildTasks(parentId);
-      const aggregatedResult = children
-        .map(
-          (c) => `## ${c.title}\n${c.result ?? "(no result)"}`
-        )
-        .join("\n\n");
-      updateTaskResult(parentId, aggregatedResult);
 
-      log.info("Parent task completed", { parentId });
+      // Aggregate child TaskResults into TaskResultAggregate
+      const aggregate: TaskResultAggregate = [];
+      for (const c of children) {
+        const parsed = parseTaskResult(c.result ?? "");
+        if (parsed) {
+          aggregate.push({ title: c.title, result: parsed });
+        } else {
+          // Child didn't have valid TaskResult — wrap it
+          aggregate.push({
+            title: c.title,
+            result: {
+              status: "success",
+              message: (c.result ?? "").split("\n")[0].slice(0, 500),
+            },
+          });
+        }
+      }
+
+      const parentResult = JSON.stringify(aggregate);
+      updateTaskResult(parentId, parentResult);
+      log.info("Parent task completed", { parentId, childCount: aggregate.length });
 
       const parent = getTask(parentId);
       if (parent?.parent_id) {

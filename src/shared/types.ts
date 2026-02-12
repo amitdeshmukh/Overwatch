@@ -131,3 +131,116 @@ export interface DaemonContext {
   workdir: string;
   taskDepths?: Map<string, number>; // taskId -> depth
 }
+
+// --- TaskResult: canonical schema for all agent ↔ daemon communication ---
+
+/**
+ * Every agent result and every inter-component message MUST conform to this schema.
+ * Sub-agents return a single TaskResult.
+ * Parent aggregation produces a TaskResultAggregate.
+ */
+export interface TaskResult {
+  status: "success" | "error";
+  message: string;
+  data?: Record<string, unknown>;  // skill-specific metadata
+}
+
+export interface TaskResultEntry {
+  title: string;
+  result: TaskResult;
+}
+
+/** Aggregated result when parent collects child results */
+export type TaskResultAggregate = TaskResultEntry[];
+
+/**
+ * Try to extract a JSON object or array from a string that may contain
+ * surrounding text (e.g. markdown fences, explanation before/after JSON).
+ * Returns the parsed value or null.
+ */
+function extractJSON(raw: string): unknown {
+  const trimmed = raw.trim();
+
+  // 1. Try direct parse
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // continue
+  }
+
+  // 2. Strip markdown fences: ```json ... ``` or ``` ... ```
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenceMatch) {
+    try {
+      return JSON.parse(fenceMatch[1].trim());
+    } catch {
+      // continue
+    }
+  }
+
+  // 3. Find first { or [ and match to closing bracket
+  const start = trimmed.search(/[{\[]/);
+  if (start === -1) return null;
+
+  const opener = trimmed[start];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === opener) depth++;
+    else if (ch === closer) depth--;
+    if (depth === 0) {
+      try {
+        return JSON.parse(trimmed.slice(start, i + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate and parse a raw string into a TaskResult.
+ * Handles agent output that may contain text around the JSON.
+ */
+export function parseTaskResult(raw: string): TaskResult | null {
+  const obj = extractJSON(raw);
+  if (!isTaskResult(obj)) return null;
+  return obj;
+}
+
+/**
+ * Validate and parse a raw string into a TaskResultAggregate.
+ * Handles agent output that may contain text around the JSON.
+ */
+export function parseTaskResultAggregate(raw: string): TaskResultAggregate | null {
+  const arr = extractJSON(raw);
+  if (!Array.isArray(arr)) return null;
+  for (const entry of arr) {
+    if (typeof entry !== "object" || !entry) return null;
+    if (typeof entry.title !== "string") return null;
+    if (!isTaskResult(entry.result)) return null;
+  }
+  return arr as TaskResultAggregate;
+}
+
+/**
+ * Type guard: is this object a valid TaskResult?
+ */
+export function isTaskResult(obj: unknown): obj is TaskResult {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, unknown>;
+  if (o.status !== "success" && o.status !== "error") return false;
+  if (typeof o.message !== "string") return false;
+  return true;
+}
+

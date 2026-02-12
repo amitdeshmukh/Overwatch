@@ -211,31 +211,20 @@ export class AgentPool {
   ): Promise<string> {
     let result = "";
 
-    const systemInstructions = `IMPORTANT - Image Generation:
-
-FOR ANY IMAGE GENERATION TASK:
-✅ Use the "nanobanana" skill from your skills library
-✅ Nanobanana generates images via Google Gemini API
-✅ It handles all image creation - styles, variations, quality control
-
-DO NOT use:
-❌ PIL, matplotlib, or Python image libraries
-❌ Manual image creation code
-❌ Other external APIs - use nanobanana instead
-
-RESULT FORMAT - After generating images:
-- Nanobanana saves files to disk automatically
-- Reference file paths in your result: "./output.png"
-- DO NOT include image content or base64 data
-- Example: "Task completed. Image saved to ./anime_healing_class.png"
-
-The daemon will automatically:
-✅ Detect image references
-✅ Attach actual image files
-✅ Send images to the user`;
+    const resultSchema = JSON.stringify({
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      required: ["status", "message"],
+      properties: {
+        status: { type: "string", enum: ["success", "error"] },
+        message: { type: "string", description: "1-2 sentence summary" },
+        data: { type: "object", description: "Optional skill-specific metadata" },
+      },
+      additionalProperties: false,
+    });
 
     for await (const message of query({
-      prompt: `${systemInstructions}\n\nTask: ${task.title}\n\n${task.prompt}`,
+      prompt: `Your final response must be ONLY a JSON object conforming to this JSON Schema:\n${resultSchema}\n\nTask: ${task.title}\n\n${task.prompt}`,
       options: {
         model: task.agent_model ?? config.model,
         cwd: this.ctx.workdir,

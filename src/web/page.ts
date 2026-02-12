@@ -119,7 +119,9 @@ function AgentRow({ agent, isLast, depth, isExpanded, onToggle }) {
       h("div", { style: { fontFamily: "var(--mono)", fontWeight: 600, color: "var(--text)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
         depth > 0 ? "└ " : "", agent.title
       ),
-      h("div", { style: { color: "var(--text-muted)", fontSize: 12 } }, agent.agentRole || "—"),
+      h("div", { style: { fontFamily: "var(--mono)", fontSize: 11, color: "var(--cyan)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+        agent.skills && agent.skills.length > 0 ? agent.skills.join(", ") : "—"
+      ),
       h("div", null, h(Pill, { ...s })),
       h("div", { style: { fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-dim)" } }, agent.agentModel || "—"),
       h("div", { style: { fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-dim)" } }, agent.id.slice(0, 8)),
@@ -203,7 +205,7 @@ function DaemonCard({ daemon, expanded, onToggle }) {
         }
       },
         h("div", null, "Agent"),
-        h("div", null, "Role"),
+        h("div", null, "Skills"),
         h("div", null, "Status"),
         h("div", null, "Model"),
         h("div", null, "ID"),
@@ -261,7 +263,7 @@ function LogPanel({ events }) {
                 onMouseEnter: (e) => { if (!isExpanded) e.currentTarget.style.background = "var(--surface-hover)"; },
                 onMouseLeave: (e) => { if (!isExpanded) e.currentTarget.style.background = "transparent"; },
               },
-                h("span", { style: { color: "var(--text-dim)" } }, ev.createdAt),
+                h("span", { style: { color: "var(--text-dim)" } }, toLocalTime(ev.createdAt)),
                 h("span", { style: { color: EVENT_COLORS[ev.type] || "var(--text-muted)", fontWeight: 600 } }, ev.type),
                 h("span", { style: { color: "var(--cyan)" } }, ev.taskId ? ev.taskId.slice(0, 8) : "—"),
                 h("span", { style: { color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 } },
@@ -283,6 +285,13 @@ function LogPanel({ events }) {
           })
     )
   );
+}
+
+function toLocalTime(utcStr) {
+  try {
+    const d = new Date(utcStr + "Z");
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch { return utcStr; }
 }
 
 function tryParsePayload(raw) {

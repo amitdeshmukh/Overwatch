@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Bot } from "grammy";
 import { getDb, closeDb } from "../db/index.js";
@@ -18,10 +18,87 @@ import {
   writePidFile,
   removePidFile,
 } from "./lifecycle.js";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { ensureSkillLibrary } from "../skills/library.js";
 import type { DaemonContext } from "../shared/types.js";
 
 const log = createLogger("daemon");
+
+const FORMAT_PROMPT = `You are a Telegram message formatter. Given an agent's raw output (which may be JSON, markdown, plain text, or a mix), produce a short, clean message suitable for a Telegram DM.
+
+Rules:
+- Extract the essential information the user cares about
+- Keep it concise — 1-3 sentences max
+- No JSON, no code blocks, no markdown formatting
+- No internal file paths or technical metadata
+- If the agent produced files/images, just say what was created
+- If it's an error, say what went wrong simply
+- Plain text only
+
+Respond with ONLY the formatted message, nothing else.`;
+
+/**
+ * Use opus to turn raw agent output into a clean Telegram message.
+ */
+async function formatForTelegram(raw: string): Promise<string> {
+  try {
+    let result = "";
+    for await (const message of query({
+      prompt: `${FORMAT_PROMPT}\n\nAgent output:\n${raw}`,
+      options: {
+        model: "claude-opus-4-6",
+        allowedTools: [],
+        maxTurns: 1,
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      if (message.type === "result" && "result" in message) {
+        result = (message as { result: string }).result;
+      }
+    }
+    return result || raw.slice(0, 500);
+  } catch (err) {
+    log.warn("Failed to format message with LLM", { error: String(err) });
+    return raw.slice(0, 500);
+  }
+}
+
+/**
+ * Scan workspace for image files.
+ * Safety net for when images exist but weren't referenced in the result.
+ */
+function findWorkspaceImages(workdir: string): string[] {
+  const images: string[] = [];
+  try {
+    if (!existsSync(workdir)) return images;
+    const files = readdirSync(workdir);
+    for (const file of files) {
+      if (/\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file)) {
+        images.push(join(workdir, file));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return images;
+}
+
+async function sendTelegramText(bot: Bot, chatId: string, text: string): Promise<void> {
+  const encoder = new TextEncoder();
+  let safe = text;
+  if (encoder.encode(text).length > 4096) {
+    const suffix = "\n...(truncated)";
+    const target = 4096 - encoder.encode(suffix).length;
+    let end = text.length;
+    while (encoder.encode(text.slice(0, end)).length > target) {
+      end = Math.floor(end * 0.9);
+    }
+    safe = text.slice(0, end) + suffix;
+  }
+  if (safe) {
+    await bot.api.sendMessage(chatId, safe);
+  }
+}
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -92,21 +169,25 @@ async function main(): Promise<void> {
   if (ctx.chatId) {
     try {
       const bot = new Bot(config.telegramToken());
+      // Track which images we've already sent to avoid duplicates
+      const sentImages = new Set<string>();
+
       scheduler.sendMessage = async (text: string) => {
-        // Telegram limit is 4096 bytes, not characters
-        const encoder = new TextEncoder();
-        let safe = text;
-        if (encoder.encode(text).length > 4096) {
-          const suffix = "\n...(truncated)";
-          const target = 4096 - encoder.encode(suffix).length;
-          // Find safe character cutoff
-          let end = text.length;
-          while (encoder.encode(text.slice(0, end)).length > target) {
-            end = Math.floor(end * 0.9);
+        // Use LLM to produce a clean Telegram message from raw agent output
+        const formatted = await formatForTelegram(text);
+        await sendTelegramText(bot, ctx.chatId!, formatted);
+
+        // Send any images the agent produced
+        for (const imgPath of findWorkspaceImages(ctx.workdir)) {
+          if (sentImages.has(imgPath)) continue;
+          sentImages.add(imgPath);
+          try {
+            const fileBuffer = readFileSync(imgPath);
+            await bot.api.sendPhoto(ctx.chatId!, fileBuffer as unknown as string);
+          } catch (err) {
+            log.warn("Failed to send image to Telegram", { path: imgPath, error: String(err) });
           }
-          safe = text.slice(0, end) + suffix;
         }
-        await bot.api.sendMessage(ctx.chatId!, safe);
       };
       log.info("Telegram messaging enabled", { chatId: ctx.chatId });
     } catch (err) {

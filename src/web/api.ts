@@ -7,6 +7,7 @@ export interface DashboardAgent {
   status: string;
   agentRole: string | null;
   agentModel: string | null;
+  skills: string[];
   result: string | null;
   parentId: string | null;
   createdAt: string;
@@ -53,6 +54,7 @@ export function getDashboardState(): DashboardState {
       status: t.status,
       agentRole: t.agent_role,
       agentModel: t.agent_model,
+      skills: JSON.parse(t.skills || "[]") as string[],
       result: t.result,
       parentId: t.parent_id,
       createdAt: t.created_at,
