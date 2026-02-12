@@ -1,0 +1,5 @@
+dist
+.claude
+.overwatch
+node_modules
+.env

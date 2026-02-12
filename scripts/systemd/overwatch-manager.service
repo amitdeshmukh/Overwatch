@@ -1,0 +1,15 @@
+[Unit]
+Description=Overwatch Daemon Manager
+After=network.target
+
+[Service]
+Type=simple
+User=overwatch
+WorkingDirectory=/opt/overwatch
+ExecStart=/usr/bin/node dist/manager/index.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/overwatch/.env
+
+[Install]
+WantedBy=multi-user.target

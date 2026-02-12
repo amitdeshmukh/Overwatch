@@ -1,0 +1,15 @@
+[Unit]
+Description=Overwatch Daemon for %i
+After=network.target
+
+[Service]
+Type=simple
+User=overwatch
+WorkingDirectory=/opt/overwatch
+ExecStart=/usr/bin/node dist/daemon/index.js --name %i
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/overwatch/.env
+
+[Install]
+WantedBy=multi-user.target
