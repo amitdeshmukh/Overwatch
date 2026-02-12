@@ -90,6 +90,7 @@ export function listDaemons(): DaemonRow[] {
 
 export function deleteDaemon(id: string): void {
   inTransaction((db) => {
+    db.prepare(`DELETE FROM task_metadata WHERE task_id IN (SELECT id FROM tasks WHERE daemon_id = ?)`).run(id);
     db.prepare(`DELETE FROM commands WHERE daemon_id = ?`).run(id);
     db.prepare(`DELETE FROM events WHERE daemon_id = ?`).run(id);
     db.prepare(`DELETE FROM tasks WHERE daemon_id = ?`).run(id);
@@ -278,7 +279,7 @@ export function getTasksByDaemon(daemonId: string): TaskRow[] {
 export function getRootTask(daemonId: string): TaskRow | undefined {
   return getDb()
     .prepare(
-      `SELECT * FROM tasks WHERE daemon_id = ? AND parent_id IS NULL ORDER BY created_at LIMIT 1`
+      `SELECT * FROM tasks WHERE daemon_id = ? AND parent_id IS NULL ORDER BY created_at DESC LIMIT 1`
     )
     .get(daemonId) as TaskRow | undefined;
 }
@@ -566,4 +567,117 @@ export function deleteMcpConfig(name: string): boolean {
     .prepare(`DELETE FROM mcp_configs WHERE name = ?`)
     .run(name);
   return result.changes > 0;
+}
+
+// --- Task Metadata (for loop detection & question deduplication) ---
+
+/**
+ * Initialize task metadata on first agent spawn
+ */
+export function initializeTaskMetadata(taskId: string): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT OR IGNORE INTO task_metadata (task_id, recent_tools, question_hashes, turn_count)
+     VALUES (?, '[]', '[]', 0)`
+  ).run(taskId);
+}
+
+/**
+ * Update recent tool usage for loop detection
+ * Keeps only the last 10 tools
+ */
+export function recordToolUsage(taskId: string, toolName: string): void {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT recent_tools FROM task_metadata WHERE task_id = ?`)
+    .get(taskId) as { recent_tools: string } | undefined;
+
+  if (!row) {
+    initializeTaskMetadata(taskId);
+    recordToolUsage(taskId, toolName);
+    return;
+  }
+
+  const tools: string[] = JSON.parse(row.recent_tools);
+  tools.push(toolName);
+  if (tools.length > 10) {
+    tools.shift();
+  }
+
+  db.prepare(
+    `UPDATE task_metadata SET recent_tools = ?, updated_at = datetime('now') WHERE task_id = ?`
+  ).run(JSON.stringify(tools), taskId);
+}
+
+/**
+ * Check if a question hash was already asked
+ */
+export function isQuestionAsked(
+  taskId: string,
+  questionHash: string
+): boolean {
+  const row = getDb()
+    .prepare(`SELECT question_hashes FROM task_metadata WHERE task_id = ?`)
+    .get(taskId) as { question_hashes: string } | undefined;
+
+  if (!row) return false;
+
+  const hashes: string[] = JSON.parse(row.question_hashes);
+  return hashes.includes(questionHash);
+}
+
+/**
+ * Record a question hash
+ */
+export function recordQuestionHash(
+  taskId: string,
+  questionHash: string
+): void {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT question_hashes FROM task_metadata WHERE task_id = ?`)
+    .get(taskId) as { question_hashes: string } | undefined;
+
+  if (!row) {
+    initializeTaskMetadata(taskId);
+    recordQuestionHash(taskId, questionHash);
+    return;
+  }
+
+  const hashes: string[] = JSON.parse(row.question_hashes);
+  if (!hashes.includes(questionHash)) {
+    hashes.push(questionHash);
+  }
+
+  db.prepare(
+    `UPDATE task_metadata SET question_hashes = ?, updated_at = datetime('now') WHERE task_id = ?`
+  ).run(JSON.stringify(hashes), taskId);
+}
+
+/**
+ * Increment turn counter
+ */
+export function incrementTaskTurnCount(taskId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT turn_count FROM task_metadata WHERE task_id = ?`)
+    .get(taskId) as { turn_count: number } | undefined;
+
+  const newCount = (row?.turn_count ?? 0) + 1;
+
+  db.prepare(
+    `UPDATE task_metadata SET turn_count = ?, updated_at = datetime('now') WHERE task_id = ?`
+  ).run(newCount, taskId);
+
+  return newCount;
+}
+
+/**
+ * Get task depth by counting parent chain
+ */
+export function getTaskDepth(taskId: string): number {
+  const task = getTask(taskId);
+  if (!task || !task.parent_id) return 0;
+
+  return 1 + getTaskDepth(task.parent_id);
 }

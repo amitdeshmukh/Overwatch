@@ -62,7 +62,10 @@ export type EventType =
   | "task_failed"
   | "needs_input"
   | "agent_stop"
-  | "file_changed";
+  | "file_changed"
+  | "loop_detected"
+  | "duplicate_question"
+  | "depth_limit_exceeded";
 
 export interface CommandRow {
   id: number;
@@ -127,4 +130,5 @@ export interface DaemonContext {
   daemonName: string;
   chatId: string | null;
   workdir: string;
+  taskDepths?: Map<string, number>; // taskId -> depth
 }

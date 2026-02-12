@@ -22,9 +22,9 @@ export function requestDaemonStart(
 ): DaemonRow {
   const daemon = getOrCreateDaemon(name, chatId);
 
-  // Only create a new root task if there isn't one already
+  // Create a new root task if there isn't one, or the existing one is terminal
   const existingRoot = getRootTask(daemon.id);
-  if (!existingRoot) {
+  if (!existingRoot || existingRoot.status === "failed" || existingRoot.status === "done") {
     createTask({
       daemonId: daemon.id,
       title: name,

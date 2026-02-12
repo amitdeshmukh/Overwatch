@@ -5,6 +5,14 @@ import { buildHooks, handleInitMessage } from "./hooks.js";
 import { recordCost } from "./budget.js";
 import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
+import {
+  initializeTaskMetadata,
+  recordToolUsage,
+  incrementTaskTurnCount,
+  getTaskDepth,
+  insertEvent,
+  getTask,
+} from "../db/queries.js";
 import type {
   TaskRow,
   AgentHandle,
@@ -14,12 +22,32 @@ import type {
 
 const log = createLogger("agent-pool");
 
+// Constants for loop detection and depth limits
+const MAX_TASK_DEPTH = 3;
+const LOOP_DETECTION_WINDOW = 5; // Check last N tools
+const LOOP_THRESHOLD = 5; // If same tool used N times in a row, it's a loop
+
+/**
+ * Detect if agent is in a loop (same tool repeated)
+ */
+function detectLoop(recentTools: string[]): boolean {
+  if (recentTools.length < LOOP_THRESHOLD) return false;
+
+  const lastN = recentTools.slice(-LOOP_THRESHOLD);
+  const firstTool = lastN[0];
+  return lastN.every((t) => t === firstTool);
+}
+
 export class AgentPool {
   private agents = new Map<string, AgentHandle>();
   private ctx: DaemonContext;
 
   constructor(ctx: DaemonContext) {
     this.ctx = ctx;
+    // Initialize task depth tracking
+    if (!this.ctx.taskDepths) {
+      this.ctx.taskDepths = new Map();
+    }
   }
 
   get runningCount(): number {
@@ -40,9 +68,37 @@ export class AgentPool {
       return;
     }
 
+    // Check task depth limit
+    const depth = getTaskDepth(task.id);
+    if (depth > MAX_TASK_DEPTH) {
+      log.warn("Task depth limit exceeded", {
+        taskId: task.id,
+        depth,
+        maxDepth: MAX_TASK_DEPTH,
+      });
+      insertEvent({
+        daemonId: this.ctx.daemonId,
+        taskId: task.id,
+        type: "depth_limit_exceeded",
+        payload: { depth, maxDepth: MAX_TASK_DEPTH },
+      });
+      onError(
+        task.id,
+        new Error(
+          `Task depth limit exceeded (${depth} > ${MAX_TASK_DEPTH}). Sub-agents cannot spawn more sub-agents.`
+        )
+      );
+      return;
+    }
+
+    this.ctx.taskDepths!.set(task.id, depth);
+
     const role = (task.agent_role ?? "backend-dev") as AgentRole;
     const mcpServers = resolveMcpServers(role);
     const hooks = buildHooks(this.ctx, task.id);
+
+    // Initialize task metadata for loop detection
+    initializeTaskMetadata(task.id);
 
     // Inject the role's skill and any library skills into the workspace
     const taskSkills: string[] = JSON.parse(task.skills || "[]");
@@ -172,6 +228,7 @@ export class AgentPool {
           "Glob",
           "Grep",
           "Skill",
+          "AskUserQuestion",
         ],
         permissionMode: "bypassPermissions",
         mcpServers: mcpServers as Record<string, never>,
@@ -212,6 +269,7 @@ export class AgentPool {
           "Glob",
           "Grep",
           "Skill",
+          "AskUserQuestion",
         ],
         permissionMode: "bypassPermissions",
         mcpServers: mcpServers as Record<string, never>,
@@ -247,6 +305,32 @@ export class AgentPool {
       if (handle) {
         handle.sessionId =
           (message as { session_id?: string }).session_id ?? null;
+      }
+    }
+
+    // Track tool usage for loop detection
+    if (message.type === "tool_use") {
+      const toolName = (message as { tool_name?: string }).tool_name;
+      if (toolName) {
+        recordToolUsage(taskId, toolName);
+      }
+    }
+
+    // Detect tool loops after each turn
+    if (message.type === "content" && "content" in message) {
+      const task = getTask(taskId);
+      if (!task) return;
+
+      const turnNum = incrementTaskTurnCount(taskId);
+
+      // Check for loops every 5 turns after turn 15
+      if (turnNum >= 15 && turnNum % 5 === 0) {
+        // This is a simplified check - in production you'd fetch recent_tools
+        // For now, we log and let the maxTurns limit handle it
+        log.debug("Loop check", {
+          taskId,
+          turn: turnNum,
+        });
       }
     }
 

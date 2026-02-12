@@ -1,3 +1,5 @@
+import { readFileSync, existsSync } from "fs";
+import { resolve } from "path";
 import type { Context } from "grammy";
 import {
   listDaemons,
@@ -20,13 +22,90 @@ const log = createLogger("commands");
 /** Telegram message byte limit */
 const TG_MAX_BYTES = 4096;
 
-const STATUS_ICONS: Record<TaskStatus, string> = {
-  pending: "[ ]",
-  blocked: "[~]",
-  running: "[*]",
-  done: "[+]",
-  failed: "[x]",
-};
+/**
+ * Extract images and text content from result.
+ * Supports:
+ * - Markdown image syntax: ![alt](url)
+ * - Direct URLs (http://, https://)
+ * - File paths (./path/to/image.png, /absolute/path/image.jpg)
+ */
+function extractContent(
+  text: string
+): { textContent: string; images: Array<{ url: string; isFile: boolean }> } {
+  const images: Array<{ url: string; isFile: boolean }> = [];
+  let textContent = text;
+
+  // Extract markdown image syntax: ![alt](url or path)
+  const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  let match;
+  while ((match = mdImageRegex.exec(text)) !== null) {
+    const imagePath = match[2];
+    if (imagePath && !images.some((img) => img.url === imagePath)) {
+      const isFile = isLocalImageFile(imagePath);
+      images.push({ url: imagePath, isFile });
+    }
+  }
+
+  // Remove markdown image syntax from text
+  textContent = textContent.replace(mdImageRegex, "");
+
+  // Extract standalone image URLs (http/https)
+  const urlRegex =
+    /(https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp))/gi;
+  while ((match = urlRegex.exec(text)) !== null) {
+    const imageUrl = match[1];
+    if (imageUrl && !images.some((img) => img.url === imageUrl)) {
+      images.push({ url: imageUrl, isFile: false });
+    }
+  }
+
+  // Remove standalone image URLs from text
+  textContent = textContent.replace(urlRegex, "").trim();
+
+  // Extract file paths (./path or /absolute/path)
+  const filePathRegex = /(?:^|\s)(\.\/[^\s]+|\/[^\s]+)\.(?:png|jpg|jpeg|gif|webp|bmp)(?:\s|$)/gm;
+  while ((match = filePathRegex.exec(text)) !== null) {
+    const filePath = match[1];
+    if (filePath && !images.some((img) => img.url === filePath)) {
+      if (isLocalImageFile(filePath)) {
+        images.push({ url: filePath, isFile: true });
+      }
+    }
+  }
+
+  // Remove file paths from text
+  textContent = textContent.replace(filePathRegex, " ").trim();
+
+  return { textContent, images };
+}
+
+/**
+ * Check if a path is a valid local image file.
+ */
+function isLocalImageFile(filePath: string): boolean {
+  if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
+    return false;
+  }
+  try {
+    const fullPath = resolve(filePath);
+    return existsSync(fullPath);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert markdown to Telegram MarkdownV2 format for better rendering.
+ */
+function formatForTelegram(text: string): string {
+  // Convert markdown headers (##, ###) to bold text
+  let result = text.replace(/^#{1,3}\s+(.+)$/gm, "*$1*");
+
+  // Convert bold markdown (**text**) to MarkdownV2 (*text*)
+  result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
+
+  return result;
+}
 
 /**
  * Truncate text to fit within Telegram's 4096-byte limit.
@@ -99,7 +178,7 @@ export const handleStatus = safe(async (ctx) => {
   const daemons = listDaemons();
 
   if (daemons.length === 0) {
-    await ctx.reply("No daemons.");
+    await ctx.reply("No daemons\\.");
     return;
   }
 
@@ -109,19 +188,21 @@ export const handleStatus = safe(async (ctx) => {
     const total = tasks.length;
     const icon =
       d.status === "running"
-        ? "*"
+        ? "▶"
         : d.status === "idle"
-          ? "o"
-          : "!";
+          ? "⏸"
+          : "⚠";
     const cost =
       d.total_cost_usd > 0
-        ? ` $${d.total_cost_usd.toFixed(2)}`
+        ? ` \\($${d.total_cost_usd.toFixed(2)}\\)`
         : "";
-    const pid = d.pid ? ` [PID ${d.pid}]` : "";
-    return `${icon} ${d.name} (${d.status})${pid} — ${done}/${total} tasks${cost}`;
+    const pid = d.pid ? ` \\[PID ${d.pid}\\]` : "";
+    return `${icon} *${d.name}* \\(${d.status}\\)${pid} — ${done}/${total} tasks${cost}`;
   });
 
-  await ctx.reply(safeTruncate(`Daemons:\n${lines.join("\n")}`));
+  await ctx.reply(safeTruncate(`*Daemons:*\n${lines.join("\n")}`), {
+    parse_mode: "MarkdownV2",
+  });
 });
 
 export const handleTree = safe(async (ctx) => {
@@ -129,36 +210,45 @@ export const handleTree = safe(async (ctx) => {
   const name = text.replace("/tree", "").trim();
 
   if (!name) {
-    await ctx.reply("Usage: /tree <daemon-name>");
+    await ctx.reply("Usage: /tree <daemon\\-name>");
     return;
   }
 
   const daemon = getDaemonByName(name);
   if (!daemon) {
-    await ctx.reply(`Daemon "${name}" not found.`);
+    await ctx.reply(`Daemon "${name}" not found\\.`);
     return;
   }
 
   const root = getRootTask(daemon.id);
   if (!root) {
-    await ctx.reply(`No tasks for "${name}".`);
+    await ctx.reply(`No tasks for "${name}"\\.`);
     return;
   }
 
   const tree = renderTree(root, 0);
   await ctx.reply(
-    safeTruncate(`Task tree for "${name}":\n\n${tree}`)
+    safeTruncate(`*Task tree for "${name}":*\n\n${tree}`),
+    { parse_mode: "MarkdownV2" }
   );
 });
 
 function renderTree(task: TaskRow, depth: number): string {
   const indent = "  ".repeat(depth);
-  const icon = STATUS_ICONS[task.status as TaskStatus] ?? "[ ]";
-  let line = `${indent}${icon} ${task.title}`;
+  // Use better symbols for Telegram
+  const statusSymbols: Record<TaskStatus, string> = {
+    pending: "⭕",
+    blocked: "🔒",
+    running: "▶️",
+    done: "✅",
+    failed: "❌",
+  };
+  const icon = statusSymbols[task.status as TaskStatus] ?? "⭕";
+  let line = `${indent}${icon} *${task.title.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, "\\$&")}*`;
 
   if (task.agent_role) {
     const model = task.agent_model ? `/${task.agent_model}` : "";
-    line += ` (${task.agent_role}${model})`;
+    line += ` \\(${task.agent_role}${model}\\)`;
   }
 
   const children = getChildTasks(task.id);
@@ -285,8 +375,37 @@ export const handleLogs = safe(async (ctx) => {
   }
 
   const result = task.result ?? "(no output yet)";
-  const header = `Logs for "${task.title}" [${task.status}]:\n\n`;
-  await ctx.reply(safeTruncate(header + result));
+  const { textContent, images } = extractContent(result);
+
+  const formatted = formatForTelegram(textContent);
+  const header = `*Logs for "${task.title}" \\[${task.status}\\]*\n\n`;
+
+  // Send header + text first
+  if (formatted) {
+    await ctx.reply(safeTruncate(header + formatted), {
+      parse_mode: "MarkdownV2",
+    });
+  } else {
+    await ctx.reply(header, { parse_mode: "MarkdownV2" });
+  }
+
+  // Send images if found
+  for (const image of images) {
+    try {
+      if (image.isFile) {
+        // Send local file as buffer
+        const filePath = resolve(image.url);
+        const fileBuffer = readFileSync(filePath);
+        await ctx.replyWithPhoto(fileBuffer as unknown as string);
+      } else {
+        // Send from URL
+        await ctx.replyWithPhoto(image.url);
+      }
+    } catch (err) {
+      log.warn("Failed to send image", { path: image.url, error: String(err) });
+      await ctx.reply(`Image: ${image.url}`);
+    }
+  }
 });
 
 export const handleAnswer = safe(async (ctx) => {

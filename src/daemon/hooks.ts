@@ -1,4 +1,10 @@
-import { insertEvent, updateTaskSessionId } from "../db/queries.js";
+import { createHash } from "node:crypto";
+import {
+  insertEvent,
+  updateTaskSessionId,
+  isQuestionAsked,
+  recordQuestionHash,
+} from "../db/queries.js";
 import { createLogger } from "../shared/logger.js";
 import type { DaemonContext } from "../shared/types.js";
 
@@ -16,6 +22,7 @@ export function buildHooks(ctx: DaemonContext, taskId: string) {
       tool_result?: string;
     }) {
       const toolName = input.tool_name ?? "";
+
       // Track file changes from Edit/Write tools
       if (toolName === "Edit" || toolName === "Write") {
         const filePath =
@@ -29,6 +36,43 @@ export function buildHooks(ctx: DaemonContext, taskId: string) {
           payload: { tool: toolName, file: filePath },
         });
       }
+
+      // Detect duplicate questions
+      if (toolName === "AskUserQuestion") {
+        const questions = input.tool_input?.["questions"] as Array<{
+          question: string;
+        }>;
+        if (questions && questions.length > 0) {
+          const questionText = JSON.stringify(questions);
+          const questionHash = createHash("sha256")
+            .update(questionText)
+            .digest("hex")
+            .slice(0, 16);
+
+          const isDuplicate = isQuestionAsked(taskId, questionHash);
+          if (isDuplicate) {
+            log.warn("Duplicate question detected", {
+              taskId,
+              questionHash,
+              questionCount: questions.length,
+            });
+            insertEvent({
+              daemonId: ctx.daemonId,
+              taskId,
+              type: "duplicate_question",
+              payload: { hash: questionHash, questionCount: questions.length },
+            });
+          } else {
+            recordQuestionHash(taskId, questionHash);
+            log.debug("Question recorded", {
+              taskId,
+              questionHash,
+              questionCount: questions.length,
+            });
+          }
+        }
+      }
+
       return {};
     },
 

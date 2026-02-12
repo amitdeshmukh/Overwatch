@@ -4,7 +4,7 @@ import { createLogger } from "../shared/logger.js";
 const log = createLogger("schema");
 
 /** Current schema version — bump when adding migrations */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS daemons (
@@ -135,6 +135,9 @@ function applyMigrations(
   if (fromVersion < 4) {
     migrateToV4(db);
   }
+  if (fromVersion < 5) {
+    migrateToV5(db);
+  }
 }
 
 function migrateToV2(db: Database.Database): void {
@@ -208,6 +211,27 @@ function migrateToV4(db: Database.Database): void {
   }
 
   log.info("Migration to v4 complete");
+}
+
+function migrateToV5(db: Database.Database): void {
+  log.info("Applying migration to v5");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_metadata (
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+      recent_tools TEXT NOT NULL DEFAULT '[]',
+      question_hashes TEXT NOT NULL DEFAULT '[]',
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_metadata_task ON task_metadata(task_id)
+  `);
+
+  log.info("Migration to v5 complete");
 }
 
 function getColumnNames(
