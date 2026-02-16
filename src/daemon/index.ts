@@ -9,6 +9,9 @@ import {
   updateDaemonPid,
   updateDaemonStatus,
   getRootTask,
+  getTask,
+  getLatestTelegramThreadForTask,
+  upsertTelegramQuestionThread,
 } from "../db/queries.js";
 import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
@@ -94,7 +97,12 @@ function findWorkspaceImages(workdir: string): string[] {
   return images;
 }
 
-async function sendTelegramText(bot: Bot, chatId: string, text: string): Promise<void> {
+async function sendTelegramText(
+  bot: Bot,
+  chatId: string,
+  text: string,
+  replyToMessageId?: number
+): Promise<number | null> {
   const encoder = new TextEncoder();
   let safe = text;
   if (encoder.encode(text).length > 4096) {
@@ -107,8 +115,14 @@ async function sendTelegramText(bot: Bot, chatId: string, text: string): Promise
     safe = text.slice(0, end) + suffix;
   }
   if (safe) {
-    await bot.api.sendMessage(chatId, safe);
+    const sent = await bot.api.sendMessage(chatId, safe, {
+      reply_parameters: replyToMessageId
+        ? { message_id: replyToMessageId }
+        : undefined,
+    });
+    return sent.message_id;
   }
+  return null;
 }
 
 async function main(): Promise<void> {
@@ -183,10 +197,30 @@ async function main(): Promise<void> {
       // Track which images we've already sent to avoid duplicates
       const sentImages = new Set<string>();
 
-      scheduler.sendMessage = async (text: string) => {
+      scheduler.sendMessage = async (text: string, taskId?: string) => {
         // Use LLM to produce a clean Telegram message from raw agent output
         const formatted = await formatForTelegram(text);
-        await sendTelegramText(bot, ctx.chatId!, formatted);
+        const findReplyTarget = (id: string): number | undefined => {
+          let cursor: string | null = id;
+          while (cursor) {
+            const thread = getLatestTelegramThreadForTask(ctx.chatId!, cursor);
+            if (thread) return thread.question_message_id;
+            const task = getTask(cursor);
+            cursor = task?.parent_id ?? null;
+          }
+          return undefined;
+        };
+
+        const replyTo = taskId ? findReplyTarget(taskId) : undefined;
+        const messageId = await sendTelegramText(bot, ctx.chatId!, formatted, replyTo);
+        if (messageId !== null && taskId) {
+          upsertTelegramQuestionThread({
+            daemonId: ctx.daemonId,
+            taskId,
+            chatId: ctx.chatId!,
+            questionMessageId: messageId,
+          });
+        }
 
         // Send any images the agent produced
         for (const imgPath of findWorkspaceImages(ctx.workdir)) {
@@ -197,6 +231,19 @@ async function main(): Promise<void> {
           } catch (err) {
             log.warn("Failed to send image to Telegram", { path: imgPath, error: String(err) });
           }
+        }
+      };
+
+      scheduler.sendQuestion = async (taskId: string, text: string) => {
+        const question = `Question from task ${taskId}:\n${text}\n\nReply to this message with your answer.`;
+        const messageId = await sendTelegramText(bot, ctx.chatId!, question);
+        if (messageId !== null) {
+          upsertTelegramQuestionThread({
+            daemonId: ctx.daemonId,
+            taskId,
+            chatId: ctx.chatId!,
+            questionMessageId: messageId,
+          });
         }
       };
       log.info("Telegram messaging enabled", { chatId: ctx.chatId });

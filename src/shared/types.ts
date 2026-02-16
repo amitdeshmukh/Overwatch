@@ -37,6 +37,7 @@ export interface TaskRow {
   status: TaskStatus;
   exec_mode: ExecMode;
   agent_role: AgentRole | null;
+  capability_id: string | null;
   agent_model: AgentModel | null;
   agent_session_id: string | null;
   deps: string; // JSON array of task IDs
@@ -92,6 +93,92 @@ export interface SkillRow {
   created_at: string;
 }
 
+export interface CapabilityRow {
+  id: string;
+  name: string;
+  description: string;
+  default_model: AgentModel | null;
+  default_exec_mode: ExecMode;
+  default_skills: string; // JSON array of skill names
+  allowed_tools: string; // JSON array of Claude Agent SDK tool names
+  allowed_mcp_servers: string; // JSON array of MCP server names
+  max_turns: number | null;
+  timeout_ms: number | null;
+  rate_limit_per_min: number | null;
+  budget_cap_usd: number | null;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CronTriggerRow {
+  id: string;
+  daemon_name: string;
+  title: string;
+  prompt: string;
+  cron_expr: string;
+  capability_id: string | null;
+  model_override: AgentModel | null;
+  skills_override: string; // JSON array
+  enabled: number;
+  last_run_at: string | null;
+  next_run_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CapabilitySpendRow {
+  capability_id: string;
+  total_cost_usd: number;
+  updated_at: string;
+}
+
+export interface TgQuestionThreadRow {
+  id: number;
+  daemon_id: string;
+  task_id: string;
+  chat_id: string;
+  question_message_id: number;
+  created_at: string;
+}
+
+export interface AgentTraceRow {
+  id: number;
+  daemon_id: string;
+  task_id: string | null;
+  parent_task_id: string | null;
+  source: string;
+  event_type: string;
+  event_subtype: string | null;
+  payload: string;
+  created_at: string;
+}
+
+export type DecompositionRunStatus = "running" | "success" | "failed";
+
+export interface DecompositionRunRow {
+  id: string;
+  daemon_id: string;
+  task_id: string | null;
+  status: DecompositionRunStatus;
+  model: string;
+  timeout_ms: number;
+  max_turns: number;
+  request_chars: number;
+  prompt_chars: number;
+  result_chars: number | null;
+  parse_attempts: number;
+  fallback_used: number;
+  error_code: string | null;
+  technical_message: string | null;
+  raw_result_excerpt: string | null;
+  started_at: string;
+  finished_at: string | null;
+  elapsed_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Runtime types ---
 
 export interface DecomposedTask {
@@ -101,6 +188,11 @@ export interface DecomposedTask {
   model: AgentModel;
   deps: string[]; // titles of tasks this depends on
   skills: string[]; // skill names from skill library
+  capability_id?: string;
+}
+
+export interface TaskPlan {
+  tasks: DecomposedTask[];
 }
 
 export interface StdioMcpConfig {
@@ -243,4 +335,3 @@ export function isTaskResult(obj: unknown): obj is TaskResult {
   if (typeof o.message !== "string") return false;
   return true;
 }
-

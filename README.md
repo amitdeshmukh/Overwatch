@@ -75,16 +75,12 @@ npm run start:headless
 
 | Command | Description |
 |---------|-------------|
-| `/start <name> <description>` | Create a project and start working |
+| Natural language message | Manager interprets intent and decides whether to start or control daemons |
 | `/status` | List all daemons with task progress and cost |
-| `/tree <name>` | Show the task tree for a project |
 | `/kill <name>` | Stop a daemon and all its agents |
-| `/pause <name>` | Pause a daemon (no new agents spawn) |
-| `/resume <name>` | Resume a paused daemon |
-| `/retry <task-id>` | Retry a failed task |
-| `/logs <task-id>` | View task output |
-| `/answer <task-id> <text>` | Answer an agent's question |
-| `/config` | List/manage MCP server configs |
+| `/killall` | Stop all daemons |
+
+When an agent asks a question, the daemon posts it as a Telegram message. Reply directly to that message and your response is routed back to the correct task automatically.
 
 ## Example
 
@@ -110,9 +106,17 @@ Skills are stored in `~/.overwatch/skill-library/`. To use a custom skill librar
 
 See [SECURITY.md](SECURITY.md) for important information about external skill execution.
 
+## Capabilities + Triggers
+
+Overwatch maintains a capability registry in SQLite. Skills are synced as capabilities and applied at runtime with capability policies (tools, MCP allowlist, model/time/turn limits, rate limit, and optional budget cap).
+
+Cron triggers are processed by the manager and enqueue root tasks when due. Trigger definitions live in the `cron_triggers` table (UTC 5-field cron).
+
+Built-in capabilities include `long-context-analysis`, which uses an RLM-style recursive analysis path for very large local logs/docs/transcripts.
+
 ## How It Works
 
-1. You send `/start api "Build a REST API"` to Telegram
+1. You send a natural language request to Telegram (e.g. "start an api project and build JWT auth")
 2. Bot writes a daemon record + root task to SQLite
 3. Manager detects the new daemon, forks a process
 4. Daemon decomposes the prompt into subtasks via Claude (e.g., "Auth System", "User CRUD", "Tests")

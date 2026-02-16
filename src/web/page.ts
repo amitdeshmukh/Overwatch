@@ -96,9 +96,13 @@ function Pill({ color, bg, label, pulse }) {
   );
 }
 
-function AgentRow({ agent, isLast, depth, isExpanded, onToggle }) {
+function AgentRow({ agent, daemonId, events, traces, isLast, depth, isExpanded, onToggle }) {
   const s = STATUS_MAP[agent.status] || STATUS_MAP.pending;
   const indent = (depth || 0) * 20;
+  const traceEvents = (traces || [])
+    .filter((ev) => ev.daemonId === daemonId && ev.taskId === agent.id)
+    .slice(0, 8)
+    .reverse();
   return h("div", null,
     h("div", {
       onClick: onToggle,
@@ -132,7 +136,7 @@ function AgentRow({ agent, isLast, depth, isExpanded, onToggle }) {
         agent.result && h("span", { style: { color: "var(--text-dim)", fontSize: 10, flexShrink: 0, transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" } }, "▼")
       )
     ),
-    isExpanded && agent.result && h("div", {
+    isExpanded && h("div", {
       style: {
         padding: "10px 20px 12px 20px",
         paddingLeft: 20 + indent,
@@ -142,14 +146,66 @@ function AgentRow({ agent, isLast, depth, isExpanded, onToggle }) {
         whiteSpace: "pre-wrap", wordBreak: "break-word",
         lineHeight: 1.6, maxHeight: 300, overflowY: "auto",
       }
-    }, agent.result)
+    },
+      h("div", null, agent.result || "(no result yet)"),
+      h("div", { style: { marginTop: 10, paddingTop: 10, borderTop: "1px dashed var(--border)", whiteSpace: "normal" } },
+        h("div", { style: { fontSize: 10, textTransform: "uppercase", letterSpacing: 1, color: "var(--text-dim)", marginBottom: 8 } }, "Internal Trace"),
+        traceEvents.length === 0
+          ? h("div", { style: { color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--sans)" } }, "No task events yet.")
+          : traceEvents.map((ev) =>
+              h("details", {
+                key: ev.id,
+                style: {
+                  marginBottom: 6,
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  background: "var(--surface)",
+                  overflow: "hidden",
+                }
+              },
+                h("summary", {
+                  style: {
+                    cursor: "pointer",
+                    listStyle: "none",
+                    padding: "6px 8px",
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    fontSize: 11,
+                  }
+                },
+                  h("span", { style: { color: "var(--text-dim)" } }, toLocalTime(ev.createdAt)),
+                  h("span", { style: { color: "var(--cyan)", fontWeight: 700 } }, ev.eventType),
+                  h("span", { style: { color: "var(--amber)" } }, traceModel(ev.payload)),
+                  h("span", { style: { color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, tryParsePayload(ev.payload))
+                ),
+                h("pre", {
+                  style: {
+                    margin: 0,
+                    padding: "8px",
+                    borderTop: "1px solid var(--border)",
+                    color: "var(--text)",
+                    background: "var(--bg)",
+                    fontSize: 11,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }
+                }, formatPayload(ev.payload))
+              )
+            )
+      )
+    )
   );
 }
 
-function DaemonCard({ daemon, expanded, onToggle }) {
-  const s = STATUS_MAP[daemon.status] || STATUS_MAP.idle;
+function DaemonCard({ daemon, events, traces, cronTriggers, expanded, onToggle }) {
+  const s = daemon.isReaped
+    ? { color: "var(--text-muted)", bg: "rgba(100,116,139,0.1)", label: "Reaped" }
+    : (STATUS_MAP[daemon.status] || STATUS_MAP.idle);
   const activeCount = daemon.agents.filter(a => a.status === "running").length;
   const doneCount = daemon.agents.filter(a => a.status === "done" || a.status === "completed").length;
+  const daemonCron = (cronTriggers || []).filter((t) => t.daemonName === daemon.name);
+  const decomp = daemon.latestDecomposition;
   const [expandedAgentId, setExpandedAgentId] = useState(null);
 
   // Build depth map from parentId
@@ -183,6 +239,10 @@ function DaemonCard({ daemon, expanded, onToggle }) {
       h("div", { style: { display: "flex", alignItems: "center", gap: 20, fontSize: 12, fontFamily: "var(--mono)" } },
         h("span", { style: { color: "var(--text-muted)" } }, activeCount + " active"),
         h("span", { style: { color: "var(--text-dim)" } }, doneCount + "/" + daemon.agents.length + " agents"),
+        h("span", { style: { color: "var(--cyan)" } }, daemonCron.length + " schedules"),
+        h("span", { style: { color: decomp ? (decomp.status === "failed" ? "var(--red)" : decomp.fallbackUsed ? "var(--amber)" : "var(--green)") : "var(--text-dim)" } },
+          decomp ? formatDecompositionSummary(decomp) : "plan: —"
+        ),
         h("span", { style: { color: "var(--amber)" } }, "$" + daemon.totalCost.toFixed(3)),
         h("span", {
           style: {
@@ -216,10 +276,44 @@ function DaemonCard({ daemon, expanded, onToggle }) {
         : daemon.agents.map((a, i) =>
             h(AgentRow, {
               key: a.id, agent: a, isLast: i === daemon.agents.length - 1, depth: depthMap[a.id] || 0,
+              daemonId: daemon.id,
+              events,
+              traces,
               isExpanded: expandedAgentId === a.id,
               onToggle: () => setExpandedAgentId(expandedAgentId === a.id ? null : a.id),
             })
-          )
+          ),
+      h("div", {
+        style: {
+          borderTop: "1px solid var(--border)",
+          padding: "10px 16px 12px 16px",
+          background: "rgba(10,14,23,0.5)",
+        }
+      },
+        h("div", { style: { fontSize: 10, fontFamily: "var(--mono)", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 } }, "Cron Triggers"),
+        daemonCron.length === 0
+          ? h("div", { style: { fontSize: 12, color: "var(--text-dim)" } }, "No cron triggers for this daemon.")
+          : daemonCron.map((t) =>
+              h("div", {
+                key: t.id,
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "60px 110px 1fr 1fr",
+                  gap: 10,
+                  fontSize: 11,
+                  fontFamily: "var(--mono)",
+                  color: "var(--text-muted)",
+                  padding: "4px 0",
+                  borderBottom: "1px dashed rgba(30,41,59,0.5)",
+                }
+              },
+                h("span", { style: { color: t.enabled ? "var(--green)" : "var(--red)" } }, t.enabled ? "ACTIVE" : "PAUSED"),
+                h("span", { style: { color: "var(--cyan)" } }, t.cronExpr),
+                h("span", { style: { color: "var(--text)" } }, t.title),
+                h("span", null, "next " + toLocalDateTime(t.nextRunAt))
+              )
+            )
+      )
     )
   );
 }
@@ -287,6 +381,55 @@ function LogPanel({ events }) {
   );
 }
 
+function CronPanel({ cronTriggers }) {
+  return h("div", {
+    style: {
+      background: "var(--surface)",
+      border: "1px solid var(--border)",
+      borderRadius: 12,
+      overflow: "hidden",
+      marginBottom: 20,
+    }
+  },
+    h("div", {
+      style: {
+        padding: "12px 20px",
+        borderBottom: "1px solid var(--border)",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+      }
+    },
+      h("span", { style: { fontSize: 13, fontWeight: 700, color: "var(--text)", fontFamily: "var(--sans)" } }, "Cron Schedules"),
+      h("span", { style: { fontSize: 10, fontFamily: "var(--mono)", color: "var(--text-dim)" } }, cronTriggers.length + " total")
+    ),
+    h("div", { style: { maxHeight: 260, overflowY: "auto", padding: "6px 0" } },
+      cronTriggers.length === 0
+        ? h("div", { style: { padding: "20px", fontSize: 12, color: "var(--text-dim)", textAlign: "center" } }, "No cron triggers yet")
+        : cronTriggers.map((t) =>
+            h("div", {
+              key: t.id,
+              style: {
+                display: "grid",
+                gridTemplateColumns: "90px 130px 140px 1fr 220px",
+                gap: 10,
+                padding: "6px 20px",
+                fontSize: 11,
+                fontFamily: "var(--mono)",
+                borderBottom: "1px solid rgba(30,41,59,0.5)",
+              }
+            },
+              h("span", { style: { color: t.enabled ? "var(--green)" : "var(--red)" } }, t.enabled ? "ACTIVE" : "PAUSED"),
+              h("span", { style: { color: "var(--cyan)" } }, t.daemonName),
+              h("span", { style: { color: "var(--text-muted)" } }, t.cronExpr),
+              h("span", { style: { color: "var(--text)" } }, t.title),
+              h("span", { style: { color: "var(--text-muted)" } }, "next " + toLocalDateTime(t.nextRunAt))
+            )
+          )
+    )
+  );
+}
+
 function toLocalTime(utcStr) {
   try {
     const d = new Date(utcStr + "Z");
@@ -294,32 +437,83 @@ function toLocalTime(utcStr) {
   } catch { return utcStr; }
 }
 
+function toLocalDateTime(utcStr) {
+  try {
+    const d = new Date(utcStr + "Z");
+    return d.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch { return utcStr; }
+}
+
 function tryParsePayload(raw) {
   try {
     const obj = JSON.parse(raw);
-    return obj.message || obj.error || obj.title || raw;
-  } catch { return raw; }
+    const candidate = obj.message ?? obj.error ?? obj.title ?? obj;
+    if (typeof candidate === "string") return candidate;
+    if (candidate && typeof candidate === "object") {
+      const keys = Object.keys(candidate);
+      return keys.length > 0
+        ? ("{" + keys.slice(0, 6).join(", ") + (keys.length > 6 ? ", ..." : "") + "}")
+        : "(object)";
+    }
+    return String(candidate);
+  } catch {
+    if (typeof raw === "string") return raw;
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return String(raw);
+    }
+  }
+}
+
+function traceModel(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    if (typeof obj.model === "string" && obj.model.length > 0) return obj.model;
+  } catch {
+    // ignore
+  }
+  return "model:—";
 }
 
 function formatPayload(raw) {
   try {
     const obj = JSON.parse(raw);
     return JSON.stringify(obj, null, 2);
-  } catch { return raw; }
+  } catch {
+    if (typeof raw === "string") return raw;
+    try {
+      return JSON.stringify(raw, null, 2);
+    } catch {
+      return String(raw);
+    }
+  }
 }
 
-function StatsBar({ daemons }) {
+function formatDecompositionSummary(run) {
+  const elapsed = typeof run.elapsedMs === "number" ? (Math.round(run.elapsedMs / 1000) + "s") : "—";
+  const status = run.status === "failed"
+    ? ("failed:" + (run.errorCode || "error"))
+    : run.fallbackUsed
+      ? "ok:fallback"
+      : "ok";
+  return "plan " + status + " " + elapsed + " p" + run.parseAttempts;
+}
+
+function StatsBar({ daemons, cronTriggers }) {
   const allAgents = daemons.flatMap(d => d.agents);
   const active = allAgents.filter(a => a.status === "running").length;
   const completed = allAgents.filter(a => a.status === "done" || a.status === "completed").length;
   const failed = allAgents.filter(a => a.status === "failed").length;
   const totalCost = daemons.reduce((s, d) => s + d.totalCost, 0);
+  const activeSchedules = (cronTriggers || []).filter((t) => t.enabled).length;
 
   const stats = [
     { label: "Daemons", value: daemons.length, color: "var(--accent)" },
     { label: "Agents Active", value: active, color: "var(--green)" },
     { label: "Completed", value: completed, color: "var(--cyan)" },
     { label: "Failed", value: failed, color: "var(--red)" },
+    { label: "Schedules", value: activeSchedules, color: "var(--purple)" },
     { label: "Session Cost", value: "$" + totalCost.toFixed(2), color: "var(--amber)" },
   ];
 
@@ -621,7 +815,7 @@ commands (
 // --- Main App ---
 
 function App() {
-  const [state, setState] = useState({ daemons: [], events: [] });
+  const [state, setState] = useState({ daemons: [], events: [], cronTriggers: [], traces: [] });
   const [expanded, setExpanded] = useState({});
   const [activeTab, setActiveTab] = useState("dashboard");
   const [error, setError] = useState(null);
@@ -699,12 +893,13 @@ function App() {
     // Content
     h("div", { style: { padding: "24px 32px", maxWidth: 1200, margin: "0 auto" } },
       activeTab === "dashboard" && h(Fragment, null,
-        h(StatsBar, { daemons: state.daemons }),
+        h(StatsBar, { daemons: state.daemons, cronTriggers: state.cronTriggers }),
+        h(CronPanel, { cronTriggers: state.cronTriggers }),
         h("div", { style: { display: "flex", flexDirection: "column", gap: 16, marginBottom: 20 } },
           state.daemons.length === 0
             ? h("div", { style: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "40px 20px", textAlign: "center", color: "var(--text-dim)", fontSize: 13 } }, "No daemons found. Start a daemon to see it here.")
             : state.daemons.map(d =>
-                h(DaemonCard, { key: d.id, daemon: d, expanded: !!expanded[d.id], onToggle: () => toggleDaemon(d.id) })
+                h(DaemonCard, { key: d.id, daemon: d, events: state.events, traces: state.traces, cronTriggers: state.cronTriggers, expanded: !!expanded[d.id], onToggle: () => toggleDaemon(d.id) })
               )
         ),
         h(LogPanel, { events: state.events })

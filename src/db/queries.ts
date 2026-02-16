@@ -14,6 +14,13 @@ import type {
   CommandRow,
   CommandType,
   AgentModel,
+  CapabilityRow,
+  CronTriggerRow,
+  CapabilitySpendRow,
+  TgQuestionThreadRow,
+  AgentTraceRow,
+  DecompositionRunRow,
+  DecompositionRunStatus,
 } from "../shared/types.js";
 
 const log = createLogger("queries");
@@ -90,6 +97,9 @@ export function listDaemons(): DaemonRow[] {
 
 export function deleteDaemon(id: string): void {
   inTransaction((db) => {
+    db.prepare(`DELETE FROM decomposition_runs WHERE daemon_id = ?`).run(id);
+    db.prepare(`DELETE FROM agent_traces WHERE daemon_id = ?`).run(id);
+    db.prepare(`DELETE FROM tg_question_threads WHERE daemon_id = ?`).run(id);
     db.prepare(`DELETE FROM task_metadata WHERE task_id IN (SELECT id FROM tasks WHERE daemon_id = ?)`).run(id);
     db.prepare(`DELETE FROM commands WHERE daemon_id = ?`).run(id);
     db.prepare(`DELETE FROM events WHERE daemon_id = ?`).run(id);
@@ -118,6 +128,17 @@ export function updateDaemonPid(
       `UPDATE daemons SET pid = ?, updated_at = datetime('now') WHERE id = ?`
     )
     .run(pid, id);
+}
+
+export function updateDaemonTmuxSession(
+  id: string,
+  session: string | null
+): void {
+  getDb()
+    .prepare(
+      `UPDATE daemons SET tmux_session = ?, updated_at = datetime('now') WHERE id = ?`
+    )
+    .run(session, id);
 }
 
 export function updateDaemonHeartbeat(id: string): void {
@@ -160,9 +181,11 @@ export function createTask(params: {
   prompt: string;
   execMode?: ExecMode;
   agentRole?: AgentRole;
+  capabilityId?: string;
   agentModel?: AgentModel;
   deps?: string[];
   skills?: string[];
+  idempotencyKey?: string;
 }): TaskRow {
   const db = getDb();
   const id = ulid();
@@ -171,9 +194,16 @@ export function createTask(params: {
   const status: TaskStatus =
     (params.deps?.length ?? 0) > 0 ? "blocked" : "pending";
 
+  if (params.idempotencyKey) {
+    const existing = db
+      .prepare(`SELECT * FROM tasks WHERE idempotency_key = ?`)
+      .get(params.idempotencyKey) as TaskRow | undefined;
+    if (existing) return existing;
+  }
+
   db.prepare(
-    `INSERT INTO tasks (id, daemon_id, parent_id, title, prompt, status, exec_mode, agent_role, agent_model, deps, skills)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO tasks (id, daemon_id, parent_id, title, prompt, status, exec_mode, agent_role, capability_id, agent_model, deps, skills, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     params.daemonId,
@@ -183,9 +213,11 @@ export function createTask(params: {
     status,
     params.execMode ?? "auto",
     params.agentRole ?? null,
+    params.capabilityId ?? null,
     params.agentModel ?? null,
     deps,
-    skills
+    skills,
+    params.idempotencyKey ?? null
   );
 
   return getTask(id)!;
@@ -202,16 +234,18 @@ export function createTasksBatch(
     prompt: string;
     execMode?: ExecMode;
     agentRole?: AgentRole;
+    capabilityId?: string;
     agentModel?: AgentModel;
     deps?: string[];
     skills?: string[];
+    idempotencyKey?: string;
   }>
 ): TaskRow[] {
   return inTransaction((db) => {
     const results: TaskRow[] = [];
     const stmt = db.prepare(
-      `INSERT INTO tasks (id, daemon_id, parent_id, title, prompt, status, exec_mode, agent_role, agent_model, deps, skills)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (id, daemon_id, parent_id, title, prompt, status, exec_mode, agent_role, capability_id, agent_model, deps, skills, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     for (const params of tasks) {
@@ -220,6 +254,16 @@ export function createTasksBatch(
       const skills = JSON.stringify(params.skills ?? []);
       const status: TaskStatus =
         (params.deps?.length ?? 0) > 0 ? "blocked" : "pending";
+
+      if (params.idempotencyKey) {
+        const existing = db
+          .prepare(`SELECT * FROM tasks WHERE idempotency_key = ?`)
+          .get(params.idempotencyKey) as TaskRow | undefined;
+        if (existing) {
+          results.push(existing);
+          continue;
+        }
+      }
 
       stmt.run(
         id,
@@ -230,9 +274,11 @@ export function createTasksBatch(
         status,
         params.execMode ?? "auto",
         params.agentRole ?? null,
+        params.capabilityId ?? null,
         params.agentModel ?? null,
         deps,
-        skills
+        skills,
+        params.idempotencyKey ?? null
       );
 
       results.push(
@@ -459,6 +505,157 @@ export function getRecentEvents(
     .all(daemonId, limit) as EventRow[];
 }
 
+// --- Agent traces (daemon + SDK stream) ---
+
+export function insertAgentTrace(params: {
+  daemonId: string;
+  taskId?: string | null;
+  parentTaskId?: string | null;
+  source: "daemon" | "agent";
+  eventType: string;
+  eventSubtype?: string | null;
+  payload?: Record<string, unknown>;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO agent_traces (daemon_id, task_id, parent_task_id, source, event_type, event_subtype, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      params.daemonId,
+      params.taskId ?? null,
+      params.parentTaskId ?? null,
+      params.source,
+      params.eventType,
+      params.eventSubtype ?? null,
+      JSON.stringify(params.payload ?? {})
+    );
+}
+
+export function getRecentAgentTraces(params: {
+  daemonId: string;
+  taskId?: string;
+  limit?: number;
+}): AgentTraceRow[] {
+  const limit = params.limit ?? 200;
+  if (params.taskId) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM agent_traces
+         WHERE daemon_id = ? AND task_id = ?
+         ORDER BY id DESC
+         LIMIT ?`
+      )
+      .all(params.daemonId, params.taskId, limit) as AgentTraceRow[];
+  }
+
+  return getDb()
+    .prepare(
+      `SELECT * FROM agent_traces
+       WHERE daemon_id = ?
+       ORDER BY id DESC
+       LIMIT ?`
+    )
+    .all(params.daemonId, limit) as AgentTraceRow[];
+}
+
+// --- Decomposition runs ---
+
+export function startDecompositionRun(params: {
+  daemonId: string;
+  taskId?: string;
+  model: string;
+  timeoutMs: number;
+  maxTurns: number;
+  requestChars: number;
+  promptChars: number;
+}): string {
+  const id = ulid();
+  getDb()
+    .prepare(
+      `INSERT INTO decomposition_runs (
+         id, daemon_id, task_id, status, model, timeout_ms, max_turns, request_chars, prompt_chars
+       ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      params.daemonId,
+      params.taskId ?? null,
+      params.model,
+      params.timeoutMs,
+      params.maxTurns,
+      params.requestChars,
+      params.promptChars
+    );
+  return id;
+}
+
+export function finishDecompositionRun(params: {
+  id: string;
+  status: DecompositionRunStatus;
+  elapsedMs: number;
+  resultChars?: number | null;
+  parseAttempts?: number;
+  fallbackUsed?: boolean;
+  errorCode?: string | null;
+  technicalMessage?: string | null;
+  rawResultExcerpt?: string | null;
+}): void {
+  getDb()
+    .prepare(
+      `UPDATE decomposition_runs
+       SET status = ?,
+           finished_at = datetime('now'),
+           elapsed_ms = ?,
+           result_chars = ?,
+           parse_attempts = ?,
+           fallback_used = ?,
+           error_code = ?,
+           technical_message = ?,
+           raw_result_excerpt = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .run(
+      params.status,
+      params.elapsedMs,
+      params.resultChars ?? null,
+      params.parseAttempts ?? 1,
+      params.fallbackUsed ? 1 : 0,
+      params.errorCode ?? null,
+      params.technicalMessage ?? null,
+      params.rawResultExcerpt ?? null,
+      params.id
+    );
+}
+
+export function getRecentDecompositionRuns(params: {
+  daemonId: string;
+  taskId?: string;
+  limit?: number;
+}): DecompositionRunRow[] {
+  const limit = params.limit ?? 20;
+  if (params.taskId) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM decomposition_runs
+         WHERE daemon_id = ? AND task_id = ?
+         ORDER BY started_at DESC
+         LIMIT ?`
+      )
+      .all(params.daemonId, params.taskId, limit) as DecompositionRunRow[];
+  }
+
+  return getDb()
+    .prepare(
+      `SELECT * FROM decomposition_runs
+       WHERE daemon_id = ?
+       ORDER BY started_at DESC
+       LIMIT ?`
+    )
+    .all(params.daemonId, limit) as DecompositionRunRow[];
+}
+
 /**
  * Atomically fetch and mark unnotified events.
  * Returns the events that were marked. Prevents duplicate notifications.
@@ -680,4 +877,234 @@ export function getTaskDepth(taskId: string): number {
   if (!task || !task.parent_id) return 0;
 
   return 1 + getTaskDepth(task.parent_id);
+}
+
+// --- Capabilities ---
+
+export function upsertCapability(params: {
+  id: string;
+  name: string;
+  description: string;
+  defaultModel?: AgentModel | null;
+  defaultExecMode?: ExecMode;
+  defaultSkills?: string[];
+  allowedTools?: string[];
+  allowedMcpServers?: string[];
+  maxTurns?: number | null;
+  timeoutMs?: number | null;
+  rateLimitPerMin?: number | null;
+  budgetCapUsd?: number | null;
+  enabled?: boolean;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO capabilities (id, name, description, default_model, default_exec_mode, default_skills, allowed_tools, allowed_mcp_servers, max_turns, timeout_ms, rate_limit_per_min, budget_cap_usd, enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         description = excluded.description,
+         default_model = excluded.default_model,
+         default_exec_mode = excluded.default_exec_mode,
+         default_skills = excluded.default_skills,
+         allowed_tools = excluded.allowed_tools,
+         allowed_mcp_servers = excluded.allowed_mcp_servers,
+         max_turns = excluded.max_turns,
+         timeout_ms = excluded.timeout_ms,
+         rate_limit_per_min = excluded.rate_limit_per_min,
+         budget_cap_usd = excluded.budget_cap_usd,
+         enabled = excluded.enabled,
+         updated_at = datetime('now')`
+    )
+    .run(
+      params.id,
+      params.name,
+      params.description,
+      params.defaultModel ?? null,
+      params.defaultExecMode ?? "auto",
+      JSON.stringify(params.defaultSkills ?? []),
+      JSON.stringify(params.allowedTools ?? []),
+      JSON.stringify(params.allowedMcpServers ?? []),
+      params.maxTurns ?? null,
+      params.timeoutMs ?? null,
+      params.rateLimitPerMin ?? null,
+      params.budgetCapUsd ?? null,
+      params.enabled === false ? 0 : 1
+    );
+}
+
+export function getCapability(id: string): CapabilityRow | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM capabilities WHERE id = ?`)
+    .get(id) as CapabilityRow | undefined;
+}
+
+export function listCapabilities(enabledOnly = true): CapabilityRow[] {
+  const db = getDb();
+  if (enabledOnly) {
+    return db
+      .prepare(`SELECT * FROM capabilities WHERE enabled = 1 ORDER BY name`)
+      .all() as CapabilityRow[];
+  }
+  return db
+    .prepare(`SELECT * FROM capabilities ORDER BY name`)
+    .all() as CapabilityRow[];
+}
+
+// --- Cron Triggers ---
+
+export function createCronTrigger(params: {
+  daemonName: string;
+  title: string;
+  prompt: string;
+  cronExpr: string;
+  capabilityId?: string;
+  modelOverride?: AgentModel;
+  skillsOverride?: string[];
+  nextRunAt: string;
+  enabled?: boolean;
+}): CronTriggerRow {
+  const db = getDb();
+  const id = ulid();
+  db.prepare(
+    `INSERT INTO cron_triggers (id, daemon_name, title, prompt, cron_expr, capability_id, model_override, skills_override, enabled, next_run_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    params.daemonName,
+    params.title,
+    params.prompt,
+    params.cronExpr,
+    params.capabilityId ?? null,
+    params.modelOverride ?? null,
+    JSON.stringify(params.skillsOverride ?? []),
+    params.enabled === false ? 0 : 1,
+    params.nextRunAt
+  );
+  return getCronTrigger(id)!;
+}
+
+export function getCronTrigger(id: string): CronTriggerRow | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM cron_triggers WHERE id = ?`)
+    .get(id) as CronTriggerRow | undefined;
+}
+
+export function listCronTriggers(enabledOnly = false): CronTriggerRow[] {
+  const db = getDb();
+  if (enabledOnly) {
+    return db
+      .prepare(`SELECT * FROM cron_triggers WHERE enabled = 1 ORDER BY next_run_at`)
+      .all() as CronTriggerRow[];
+  }
+  return db
+    .prepare(`SELECT * FROM cron_triggers ORDER BY next_run_at`)
+    .all() as CronTriggerRow[];
+}
+
+export function getDueCronTriggers(now: string): CronTriggerRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM cron_triggers
+       WHERE enabled = 1 AND next_run_at <= ?
+       ORDER BY next_run_at ASC`
+    )
+    .all(now) as CronTriggerRow[];
+}
+
+export function markCronTriggerRun(
+  id: string,
+  lastRunAt: string,
+  nextRunAt: string
+): void {
+  getDb()
+    .prepare(
+      `UPDATE cron_triggers
+       SET last_run_at = ?, next_run_at = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .run(lastRunAt, nextRunAt, id);
+}
+
+export function disableCronTrigger(id: string): void {
+  getDb()
+    .prepare(
+      `UPDATE cron_triggers
+       SET enabled = 0, updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .run(id);
+}
+
+export function addCapabilityCost(
+  capabilityId: string,
+  costUsd: number
+): void {
+  if (costUsd <= 0) return;
+  getDb()
+    .prepare(
+      `INSERT INTO capability_spend (capability_id, total_cost_usd)
+       VALUES (?, ?)
+       ON CONFLICT(capability_id) DO UPDATE SET
+         total_cost_usd = capability_spend.total_cost_usd + excluded.total_cost_usd,
+         updated_at = datetime('now')`
+    )
+    .run(capabilityId, costUsd);
+}
+
+export function getCapabilitySpend(
+  capabilityId: string
+): CapabilitySpendRow | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM capability_spend WHERE capability_id = ?`)
+    .get(capabilityId) as CapabilitySpendRow | undefined;
+}
+
+// --- Telegram question threads ---
+
+export function upsertTelegramQuestionThread(params: {
+  daemonId: string;
+  taskId: string;
+  chatId: string;
+  questionMessageId: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tg_question_threads (daemon_id, task_id, chat_id, question_message_id)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(chat_id, question_message_id) DO UPDATE SET
+         daemon_id = excluded.daemon_id,
+         task_id = excluded.task_id`
+    )
+    .run(
+      params.daemonId,
+      params.taskId,
+      params.chatId,
+      params.questionMessageId
+    );
+}
+
+export function getTelegramQuestionThread(
+  chatId: string,
+  questionMessageId: number
+): TgQuestionThreadRow | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM tg_question_threads
+       WHERE chat_id = ? AND question_message_id = ?`
+    )
+    .get(chatId, questionMessageId) as TgQuestionThreadRow | undefined;
+}
+
+export function getLatestTelegramThreadForTask(
+  chatId: string,
+  taskId: string
+): TgQuestionThreadRow | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM tg_question_threads
+       WHERE chat_id = ? AND task_id = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    )
+    .get(chatId, taskId) as TgQuestionThreadRow | undefined;
 }

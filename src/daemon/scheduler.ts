@@ -18,8 +18,11 @@ import {
   updateTaskDepsBatch,
   getPendingCommands,
   markCommandHandled,
+  getRecentEvents,
+  insertAgentTrace,
 } from "../db/queries.js";
-import { decompose } from "./decomposer.js";
+import { planRootTask } from "./planner.js";
+import { DecompositionError } from "./decomposer.js";
 import { AgentPool } from "./agent-pool.js";
 import { isBudgetExceeded } from "./budget.js";
 import { config } from "../shared/config.js";
@@ -50,7 +53,8 @@ export class Scheduler {
   private pendingNotifications = 0;
 
   /** Callback to send a Telegram message to the user */
-  sendMessage: ((text: string) => Promise<void>) | null = null;
+  sendMessage: ((text: string, taskId?: string) => Promise<void>) | null = null;
+  sendQuestion: ((taskId: string, text: string) => Promise<void>) | null = null;
 
   constructor(ctx: DaemonContext) {
     this.ctx = ctx;
@@ -61,6 +65,12 @@ export class Scheduler {
     this.running = true;
     this.paused = false;
     updateDaemonStatus(this.ctx.daemonId, "running");
+    insertAgentTrace({
+      daemonId: this.ctx.daemonId,
+      source: "daemon",
+      eventType: "scheduler_started",
+      payload: { daemon: this.ctx.daemonName },
+    });
     log.info("Scheduler started", { daemon: this.ctx.daemonName });
 
     await this.tick();
@@ -91,6 +101,12 @@ export class Scheduler {
       this.pollTimer = null;
     }
     this.pool.killAll();
+    insertAgentTrace({
+      daemonId: this.ctx.daemonId,
+      source: "daemon",
+      eventType: "scheduler_stopped",
+      payload: { daemon: this.ctx.daemonName },
+    });
     log.info("Scheduler stopped", { daemon: this.ctx.daemonName });
   }
 
@@ -116,6 +132,7 @@ export class Scheduler {
 
     // 1. Process pending commands from bot
     await this.processCommands();
+    await this.processNeedsInputEvents();
 
     if (!this.running) return; // kill command may have stopped us
 
@@ -125,6 +142,12 @@ export class Scheduler {
     // Don't spawn new work if budget exceeded
     if (isBudgetExceeded(daemonId)) {
       log.warn("Budget exceeded, not spawning new agents");
+      insertAgentTrace({
+        daemonId,
+        source: "daemon",
+        eventType: "budget_exceeded",
+        payload: {},
+      });
       return;
     }
 
@@ -187,6 +210,9 @@ export class Scheduler {
         updateDaemonStatus(daemonId, "idle");
         // Child results already notified individually — no need to re-send
         this.stop();
+      } else if (rootTask && rootTask.status === "failed") {
+        updateDaemonStatus(daemonId, "idle");
+        this.stop();
       }
     }
 
@@ -210,6 +236,35 @@ export class Scheduler {
     }
   }
 
+  private async processNeedsInputEvents(): Promise<void> {
+    if (!this.sendQuestion) return;
+
+    const events = getRecentEvents(this.ctx.daemonId, 50).filter(
+      (e) => e.type === "needs_input" && e.notified === 0
+    );
+    if (events.length === 0) return;
+
+    for (const event of events.reverse()) {
+      const taskId = event.task_id;
+      if (!taskId) continue;
+
+      let questionText = "Agent requested input.";
+      try {
+        const payload = JSON.parse(event.payload) as { questions?: string[] };
+        if (payload.questions && payload.questions.length > 0) {
+          questionText = payload.questions.join("\n");
+        }
+      } catch {
+        // ignore malformed payload
+      }
+
+      await this.sendQuestion(taskId, questionText);
+
+      const db = (await import("../db/index.js")).getDb();
+      db.prepare(`UPDATE events SET notified = 1 WHERE id = ?`).run(event.id);
+    }
+  }
+
   private async handleCommand(cmd: CommandRow): Promise<void> {
     let payload: Record<string, unknown>;
     try {
@@ -224,6 +279,13 @@ export class Scheduler {
 
     switch (cmd.type) {
       case "answer": {
+        insertAgentTrace({
+          daemonId: this.ctx.daemonId,
+          source: "daemon",
+          eventType: "command_received",
+          eventSubtype: "answer",
+          payload: { commandId: cmd.id },
+        });
         const taskId =
           typeof payload.taskId === "string" ? payload.taskId : null;
         const text =
@@ -246,6 +308,13 @@ export class Scheduler {
       }
 
       case "kill": {
+        insertAgentTrace({
+          daemonId: this.ctx.daemonId,
+          source: "daemon",
+          eventType: "command_received",
+          eventSubtype: "kill",
+          payload: { commandId: cmd.id },
+        });
         log.info("Kill command received");
         const running = getRunningTasks(this.ctx.daemonId);
         for (const task of running) {
@@ -260,18 +329,39 @@ export class Scheduler {
       }
 
       case "pause": {
+        insertAgentTrace({
+          daemonId: this.ctx.daemonId,
+          source: "daemon",
+          eventType: "command_received",
+          eventSubtype: "pause",
+          payload: { commandId: cmd.id },
+        });
         log.info("Pause command received");
         this.paused = true;
         break;
       }
 
       case "resume": {
+        insertAgentTrace({
+          daemonId: this.ctx.daemonId,
+          source: "daemon",
+          eventType: "command_received",
+          eventSubtype: "resume",
+          payload: { commandId: cmd.id },
+        });
         log.info("Resume command received");
         this.paused = false;
         break;
       }
 
       case "retry": {
+        insertAgentTrace({
+          daemonId: this.ctx.daemonId,
+          source: "daemon",
+          eventType: "command_received",
+          eventSubtype: "retry",
+          payload: { commandId: cmd.id },
+        });
         const taskId =
           typeof payload.taskId === "string" ? payload.taskId : null;
         if (!taskId) {
@@ -307,7 +397,11 @@ export class Scheduler {
     updateTaskStatus(root.id, "running");
 
     try {
-      const subtasks = await decompose(root.prompt, this.ctx.workdir);
+      const plan = await planRootTask(root.prompt, this.ctx.workdir, {
+        daemonId: this.ctx.daemonId,
+        taskId: root.id,
+      });
+      const subtasks = plan.tasks;
 
       if (subtasks.length === 0) {
         // Simple task — run directly, with fallback if spawn fails
@@ -333,6 +427,7 @@ export class Scheduler {
           prompt: sub.prompt,
           execMode: sub.exec_mode,
           agentModel: sub.model,
+          capabilityId: sub.capability_id,
           deps: [],
           skills: sub.skills,
         }))
@@ -377,10 +472,26 @@ export class Scheduler {
         titles: subtasks.map((s) => s.title),
       });
     } catch (err) {
-      log.error("Decomposition failed", { error: String(err) });
-      failTask(root.id, `Decomposition failed: ${err}`);
+      if (err instanceof DecompositionError) {
+        log.error("Decomposition failed", {
+          code: err.code,
+          elapsedMs: err.elapsedMs,
+          technical: err.technicalMessage,
+        });
+        failTask(root.id, `Decomposition failed [${err.code}]: ${err.technicalMessage}`);
+        await this.notify(
+          `Could not start "${this.ctx.daemonName}": ${err.userMessage}`,
+          root.id
+        );
+        return;
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("Decomposition failed", { error: message });
+      failTask(root.id, `Decomposition failed: ${message}`);
       await this.notify(
-        `Decomposition failed for "${this.ctx.daemonName}": ${err}`
+        `Could not start "${this.ctx.daemonName}": planning failed unexpectedly.`,
+        root.id
       );
     }
   }
@@ -404,7 +515,7 @@ export class Scheduler {
     });
 
     // Send result to Telegram — wait for formatting + image send before proceeding to shutdown
-    this.notify(result).then(() => {
+    this.notify(result, taskId).then(() => {
       const task = getTask(taskId);
       if (task?.parent_id) {
         this.checkParentCompletion(task.parent_id);
@@ -429,7 +540,8 @@ export class Scheduler {
 
     const task = getTask(taskId);
     this.notify(
-      `Task "${task?.title ?? taskId}" failed: ${error.message}`
+      `Task "${task?.title ?? taskId}" failed: ${error.message}`,
+      taskId
     ).catch(() => {});
 
     if (task?.parent_id) {
@@ -475,12 +587,12 @@ export class Scheduler {
     }
   }
 
-  private async notify(message: string): Promise<void> {
+  private async notify(message: string, taskId?: string): Promise<void> {
     log.info("Notification", { message: message.slice(0, 200) });
     if (this.sendMessage) {
       this.pendingNotifications++;
       try {
-        await this.sendMessage(message);
+        await this.sendMessage(message, taskId);
       } catch (err) {
         log.error("Failed to send Telegram message", {
           error: String(err),

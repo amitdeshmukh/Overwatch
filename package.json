@@ -14,12 +14,12 @@
     "start:manager": "node dist/manager/index.js",
     "start:telegram": "node dist/telegram/index.js",
     "start:tui": "node dist/tui/index.js",
-    "dev": "tsx src/launch.ts",
-    "dev:daemon": "tsx src/daemon/index.ts",
-    "dev:manager": "tsx src/manager/index.ts",
-    "dev:telegram": "tsx src/telegram/index.ts",
-    "dev:tui": "tsx src/tui/index.ts",
-    "dev:web": "tsx src/web/index.ts"
+    "dev": "tsx watch src/launch.ts",
+    "dev:daemon": "tsx watch src/daemon/index.ts",
+    "dev:manager": "tsx watch src/manager/index.ts",
+    "dev:telegram": "tsx watch src/telegram/index.ts",
+    "dev:tui": "tsx watch src/tui/index.ts",
+    "dev:web": "tsx watch src/web/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.0",

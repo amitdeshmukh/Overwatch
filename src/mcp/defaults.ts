@@ -23,4 +23,32 @@ export const DEFAULT_MCP_SERVERS: Record<
       args: ["-y", "@bytebase/dbhub", "--dsn", process.env.OW_DB_URL ?? ""],
     },
   },
+  email: {
+    roles: null,
+    config: {
+      type: "http",
+      url: process.env.OW_MCP_EMAIL_URL ?? "http://localhost:8071/mcp",
+    },
+  },
+  analytics: {
+    roles: null,
+    config: {
+      type: "http",
+      url: process.env.OW_MCP_ANALYTICS_URL ?? "http://localhost:8072/mcp",
+    },
+  },
+  "google-ads": {
+    roles: null,
+    config: {
+      type: "http",
+      url: process.env.OW_MCP_GOOGLE_ADS_URL ?? "http://localhost:8073/mcp",
+    },
+  },
+  "meta-ads": {
+    roles: null,
+    config: {
+      type: "http",
+      url: process.env.OW_MCP_META_ADS_URL ?? "http://localhost:8074/mcp",
+    },
+  },
 };

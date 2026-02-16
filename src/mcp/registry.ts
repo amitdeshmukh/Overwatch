@@ -26,12 +26,16 @@ function isValidConfig(config: unknown): config is McpServerConfig {
  * Merges database configs with defaults (DB takes precedence).
  */
 export function resolveMcpServers(
-  role: AgentRole
+  role: AgentRole,
+  onlyNames: string[] = []
 ): Record<string, McpServerConfig> {
   const result: Record<string, McpServerConfig> = {};
+  const nameFilter = new Set(onlyNames);
+  const filterEnabled = nameFilter.size > 0;
 
   // Apply defaults for this role
   for (const [name, def] of Object.entries(DEFAULT_MCP_SERVERS)) {
+    if (filterEnabled && !nameFilter.has(name)) continue;
     if (def.roles === null || def.roles.includes(role)) {
       if (isValidConfig(def.config)) {
         result[name] = def.config;
@@ -45,6 +49,7 @@ export function resolveMcpServers(
   try {
     const dbConfigs = getMcpConfigsForRole(role);
     for (const row of dbConfigs) {
+      if (filterEnabled && !nameFilter.has(row.name)) continue;
       try {
         const parsed = JSON.parse(row.config);
         if (isValidConfig(parsed)) {

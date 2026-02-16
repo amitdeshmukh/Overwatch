@@ -3,17 +3,10 @@ import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
 import { getDb, closeDb } from "../db/index.js";
 import {
-  handleStart,
   handleStatus,
-  handleTree,
   handleKill,
   handleKillAll,
-  handlePause,
-  handleResume,
-  handleRetry,
-  handleLogs,
-  handleAnswer,
-  handleConfig,
+  handleManagerMessage,
 } from "./commands.js";
 
 const log = createLogger("telegram");
@@ -47,34 +40,13 @@ async function main(): Promise<void> {
   });
 
   // Register commands
-  bot.command("start", handleStart);
   bot.command("status", handleStatus);
-  bot.command("tree", handleTree);
   bot.command("kill", handleKill);
   bot.command("killall", handleKillAll);
-  bot.command("pause", handlePause);
-  bot.command("resume", handleResume);
-  bot.command("retry", handleRetry);
-  bot.command("logs", handleLogs);
-  bot.command("answer", handleAnswer);
-  bot.command("config", handleConfig);
 
-  // Fallback
+  // Natural language manager control
   bot.on("message:text", async (ctx) => {
-    await ctx.reply(
-      "Commands:\n" +
-        "/start <name> <desc> — Start a new project\n" +
-        "/status — List all daemons\n" +
-        "/tree <name> — Show task tree\n" +
-        "/kill <name> — Stop a daemon\n" +
-        "/killall — Kill all daemons\n" +
-        "/pause <name> — Pause a daemon\n" +
-        "/resume <name> — Resume a daemon\n" +
-        "/retry <task-id> — Retry a failed task\n" +
-        "/logs <task-id> — View task output\n" +
-        "/answer <task-id> <text> — Answer agent question\n" +
-        "/config — Manage MCP configs"
-    );
+    await handleManagerMessage(ctx);
   });
 
   // Graceful shutdown — daemons keep running

@@ -1,4 +1,4 @@
-import { addDaemonCost, getDaemon } from "../db/queries.js";
+import { addCapabilityCost, addDaemonCost, getCapabilitySpend, getDaemon } from "../db/queries.js";
 import { config } from "../shared/config.js";
 import { createLogger } from "../shared/logger.js";
 
@@ -10,10 +10,14 @@ const log = createLogger("budget");
  */
 export function recordCost(
   daemonId: string,
-  costUsd: number
+  costUsd: number,
+  capabilityId?: string | null
 ): boolean {
   if (costUsd > 0) {
     addDaemonCost(daemonId, costUsd);
+    if (capabilityId) {
+      addCapabilityCost(capabilityId, costUsd);
+    }
     log.debug("Recorded cost", { daemonId, costUsd });
   }
 
@@ -31,4 +35,16 @@ export function isBudgetExceeded(daemonId: string): boolean {
   if (!daemon) return false;
 
   return daemon.total_cost_usd >= cap;
+}
+
+/**
+ * Check whether a capability-specific budget cap has been exceeded.
+ */
+export function isCapabilityBudgetExceeded(
+  capabilityId: string,
+  capUsd: number | null
+): boolean {
+  if (!capUsd || capUsd <= 0) return false;
+  const spend = getCapabilitySpend(capabilityId);
+  return (spend?.total_cost_usd ?? 0) >= capUsd;
 }

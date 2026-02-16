@@ -7,11 +7,20 @@ import {
   getTasksByDaemon,
   getTask,
   getRecentEvents,
+  listCronTriggers,
+  getRecentAgentTraces,
+  getRecentDecompositionRuns,
 } from "../db/queries.js";
 import { TreeView, flattenTaskTree } from "./tree-view.js";
 import { LogView } from "./log-view.js";
 import { DetailView } from "./detail-view.js";
-import type { DaemonRow, TaskRow, EventRow } from "../shared/types.js";
+import type {
+  DaemonRow,
+  TaskRow,
+  EventRow,
+  AgentTraceRow,
+  DecompositionRunRow,
+} from "../shared/types.js";
 
 type FocusPanel = "daemons" | "tasks" | "events";
 
@@ -98,6 +107,11 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
   const buildTaskDetail = (taskId: string): DetailContent | null => {
     const task = getTask(taskId);
     if (!task) return null;
+    const traces = getRecentAgentTraces({
+      daemonId: task.daemon_id,
+      taskId,
+      limit: 8,
+    }).reverse();
     const lines = [
       `Status: ${task.status}  Model: ${task.agent_model ?? "—"}`,
       "",
@@ -106,6 +120,11 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
       "",
       "Result:",
       task.result ?? "(no result yet)",
+      "",
+      "Trace:",
+      ...(traces.length === 0
+        ? ["(no trace yet)"]
+        : traces.map((tr) => formatTraceLine(tr))),
     ];
     return { title: task.title, body: lines.join("\n") };
   };
@@ -230,6 +249,16 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
   });
 
   const daemon = daemons.find((d) => d.name === selectedDaemon);
+  const allCronTriggers = listCronTriggers(false);
+  const daemonTraces = daemon
+    ? getRecentAgentTraces({ daemonId: daemon.id, limit: 8 }).reverse()
+    : [];
+  const daemonCronTriggers = daemon
+    ? allCronTriggers.filter((t) => t.daemon_name === daemon.name)
+    : [];
+  const daemonDecompositionRuns = daemon
+    ? getRecentDecompositionRuns({ daemonId: daemon.id, limit: 4 }).reverse()
+    : [];
 
   // Get selected event ID for highlighting
   const eventIds = getEventIds();
@@ -289,8 +318,22 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
             `Daemons${daemonFocus}`
           ),
           ...daemons.map((d) => {
-            const icon =
-              d.status === "running"
+            const daemonTasks = getTasksByDaemon(d.id);
+            const hasActiveWork = daemonTasks.some(
+              (t) =>
+                t.status === "pending" ||
+                t.status === "blocked" ||
+                t.status === "running"
+            );
+            const isReaped =
+              d.status === "idle" &&
+              !d.pid &&
+              !d.tmux_session &&
+              !hasActiveWork &&
+              daemonTasks.length > 0;
+            const icon = isReaped
+              ? "-"
+              : d.status === "running"
                 ? "*"
                 : d.status === "idle"
                   ? "o"
@@ -302,6 +345,7 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
                 : "";
             const pid = d.pid ? ` [${d.pid}]` : "";
             const pointer = focusPanel === "daemons" && isSelected ? ">" : " ";
+            const statusLabel = isReaped ? "reaped" : d.status;
             return React.createElement(
               Text,
               {
@@ -309,9 +353,24 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
                 color: isSelected ? "cyan" : undefined,
                 bold: isSelected,
               },
-              `${pointer} ${icon} ${d.name} (${d.status})${pid}${cost}`
+              `${pointer} ${icon} ${d.name} (${statusLabel})${pid}${cost}`
             );
-          })
+          }),
+          React.createElement(Text, null, ""),
+          React.createElement(
+            Text,
+            { bold: true, underline: true },
+            "Schedules"
+          ),
+          allCronTriggers.length === 0
+            ? React.createElement(Text, { color: "gray" }, "No cron schedules")
+            : allCronTriggers.slice(0, 8).map((t) =>
+                React.createElement(
+                  Text,
+                  { key: t.id, color: t.enabled ? "green" : "gray" },
+                  `${t.enabled ? "*" : "o"} ${t.daemon_name} ${t.cron_expr} -> ${t.next_run_at}`
+                )
+              )
         ),
         // Task tree
         React.createElement(
@@ -346,20 +405,87 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
               body: detailContent.body,
             })
           : daemon
-            ? React.createElement(LogView, {
-                daemonId: daemon.id,
-                maxLines: 30,
-                selectedEventId: focusPanel === "events" ? selectedEventId : null,
-                onEventCount: handleEventCount,
-              })
+            ? React.createElement(
+                Box,
+                { flexDirection: "column" },
+                React.createElement(LogView, {
+                  daemonId: daemon.id,
+                  maxLines: 24,
+                  selectedEventId: focusPanel === "events" ? selectedEventId : null,
+                  onEventCount: handleEventCount,
+                }),
+                React.createElement(
+                  Box,
+                  { flexDirection: "column", paddingX: 1 },
+                  React.createElement(
+                    Text,
+                    { bold: true, underline: true },
+                    "Cron Triggers"
+                  ),
+                  daemonCronTriggers.length === 0
+                    ? React.createElement(Text, { color: "gray" }, "No schedules")
+                    : daemonCronTriggers.slice(0, 6).map((t) =>
+                        React.createElement(
+                          Text,
+                          { key: t.id, color: t.enabled ? "green" : "gray" },
+                          `${t.enabled ? "*" : "o"} ${t.cron_expr}  next ${t.next_run_at}  ${t.title}`
+                        )
+                      ),
+                  React.createElement(Text, null, ""),
+                  React.createElement(
+                    Text,
+                    { bold: true, underline: true },
+                    "Agent Traces"
+                  ),
+                  daemonTraces.length === 0
+                    ? React.createElement(Text, { color: "gray" }, "No traces yet")
+                    : daemonTraces.map((tr) =>
+                        React.createElement(
+                          Text,
+                          { key: tr.id, color: "gray" },
+                          formatTraceLine(tr)
+                        )
+                      ),
+                  React.createElement(Text, null, ""),
+                  React.createElement(
+                    Text,
+                    { bold: true, underline: true },
+                    "Decomposition Runs"
+                  ),
+                  daemonDecompositionRuns.length === 0
+                    ? React.createElement(Text, { color: "gray" }, "No decomposition runs yet")
+                    : daemonDecompositionRuns.map((run) =>
+                        React.createElement(
+                          Text,
+                          {
+                            key: run.id,
+                            color:
+                              run.status === "failed"
+                                ? "red"
+                                : run.fallback_used === 1
+                                  ? "yellow"
+                                  : "green",
+                          },
+                          formatDecompositionRun(run)
+                        )
+                      )
+                )
+              )
             : React.createElement(
                 Box,
-                { padding: 1 },
-                React.createElement(
-                  Text,
-                  { color: "gray" },
-                  "Select a daemon"
-                )
+                { padding: 1, flexDirection: "column" },
+                React.createElement(Text, { color: "gray" }, "No daemon selected"),
+                React.createElement(Text, null, ""),
+                React.createElement(Text, { bold: true, underline: true }, "Cron Triggers"),
+                allCronTriggers.length === 0
+                  ? React.createElement(Text, { color: "gray" }, "No schedules")
+                  : allCronTriggers.map((t) =>
+                      React.createElement(
+                        Text,
+                        { key: t.id, color: t.enabled ? "green" : "gray" },
+                        `${t.enabled ? "*" : "o"} ${t.daemon_name} ${t.cron_expr} next ${t.next_run_at}`
+                      )
+                    )
               )
       )
     ),
@@ -381,6 +507,35 @@ function App({ initialDaemon }: AppProps): React.ReactElement {
         : null
     )
   );
+}
+
+function formatTraceLine(trace: AgentTraceRow): string {
+  let model = "—";
+  try {
+    const payload = JSON.parse(trace.payload) as Record<string, unknown>;
+    if (typeof payload.model === "string" && payload.model.length > 0) {
+      model = payload.model;
+    }
+  } catch {
+    // ignore malformed payload
+  }
+  const subtype = trace.event_subtype ? `:${trace.event_subtype}` : "";
+  return `${trace.created_at.slice(11, 19)} ${trace.event_type}${subtype} m=${model}`;
+}
+
+function formatDecompositionRun(run: DecompositionRunRow): string {
+  const time = run.started_at.slice(11, 19);
+  const elapsed =
+    typeof run.elapsed_ms === "number"
+      ? `${Math.round(run.elapsed_ms / 1000)}s`
+      : "—";
+  const status =
+    run.status === "failed"
+      ? `failed:${run.error_code ?? "error"}`
+      : run.fallback_used === 1
+        ? "ok:fallback"
+        : "ok";
+  return `${time} ${status} ${elapsed} parse=${run.parse_attempts} model=${run.model}`;
 }
 
 function main(): void {

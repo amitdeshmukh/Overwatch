@@ -88,4 +88,7 @@ export const config = {
 
   /** Web dashboard port */
   webPort: envInt("OW_WEB_PORT", "7777", 1),
+
+  /** Keep idle daemon runtime sessions for this many hours before reaping (default 7 days). */
+  idleReapGraceMs: envInt("OW_IDLE_REAP_GRACE_HOURS", "168", 0) * 60 * 60 * 1000,
 } as const;

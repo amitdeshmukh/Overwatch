@@ -43,6 +43,15 @@ export function buildHooks(ctx: DaemonContext, taskId: string) {
           question: string;
         }>;
         if (questions && questions.length > 0) {
+          insertEvent({
+            daemonId: ctx.daemonId,
+            taskId,
+            type: "needs_input",
+            payload: {
+              questions: questions.map((q) => q.question),
+            },
+          });
+
           const questionText = JSON.stringify(questions);
           const questionHash = createHash("sha256")
             .update(questionText)
