@@ -114,6 +114,7 @@ export interface CapabilityRow {
 export interface CronTriggerRow {
   id: string;
   daemon_name: string;
+  chat_id: string | null;
   title: string;
   prompt: string;
   cron_expr: string;

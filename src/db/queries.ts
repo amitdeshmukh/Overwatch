@@ -954,6 +954,7 @@ export function listCapabilities(enabledOnly = true): CapabilityRow[] {
 
 export function createCronTrigger(params: {
   daemonName: string;
+  chatId?: string;
   title: string;
   prompt: string;
   cronExpr: string;
@@ -966,11 +967,12 @@ export function createCronTrigger(params: {
   const db = getDb();
   const id = ulid();
   db.prepare(
-    `INSERT INTO cron_triggers (id, daemon_name, title, prompt, cron_expr, capability_id, model_override, skills_override, enabled, next_run_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO cron_triggers (id, daemon_name, chat_id, title, prompt, cron_expr, capability_id, model_override, skills_override, enabled, next_run_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     params.daemonName,
+    params.chatId ?? null,
     params.title,
     params.prompt,
     params.cronExpr,

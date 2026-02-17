@@ -256,7 +256,7 @@ function processDueCronTriggers(): void {
       next.toISOString().slice(0, 19).replace("T", " ")
     );
 
-    const daemon = getOrCreateDaemon(trigger.daemon_name);
+    const daemon = getOrCreateDaemon(trigger.daemon_name, trigger.chat_id ?? undefined);
     const root = getRootTask(daemon.id);
     if (root && (root.status === "pending" || root.status === "blocked" || root.status === "running")) {
       log.info("Skipping cron trigger because daemon already has active root task", {

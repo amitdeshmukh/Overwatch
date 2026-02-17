@@ -703,6 +703,7 @@ export const handleSchedule = safe(async (ctx) => {
 
   const trigger = createCronTrigger({
     daemonName,
+    chatId: String(ctx.chat?.id ?? ""),
     title,
     prompt,
     cronExpr,
@@ -745,6 +746,23 @@ type ManagerIntent =
   | { action: "kill_all" }
   | { action: "noop"; reason: string };
 
+type RoutedIntent = {
+  task: boolean;
+  action:
+    | "chat"
+    | "start_daemon"
+    | "daemon_command"
+    | "status"
+    | "kill_all"
+    | "noop";
+  message?: string;
+  name?: string;
+  prompt?: string;
+  daemonName?: string;
+  command?: "kill" | "pause" | "resume";
+  reason?: string;
+};
+
 type ParsedScheduleIntent = {
   daemonName: string;
   title: string;
@@ -754,7 +772,7 @@ type ParsedScheduleIntent = {
   localTime: string;
 };
 
-function parseIntentJson(raw: string): ManagerIntent | null {
+function parseIntentJson(raw: string): RoutedIntent | null {
   const trimmed = raw.trim();
   const candidates: string[] = [trimmed];
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -762,8 +780,13 @@ function parseIntentJson(raw: string): ManagerIntent | null {
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate) as ManagerIntent;
-      if (parsed && typeof parsed === "object" && "action" in parsed) {
+      const parsed = JSON.parse(candidate) as RoutedIntent;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof parsed.task === "boolean" &&
+        typeof parsed.action === "string"
+      ) {
         return parsed;
       }
     } catch {
@@ -785,30 +808,6 @@ function isGreetingOnly(text: string): boolean {
     "good afternoon",
     "good evening",
   ].includes(normalized);
-}
-
-function isLikelyWorkRequest(text: string): boolean {
-  const normalized = text.toLowerCase();
-  const markers = [
-    "create",
-    "generate",
-    "build",
-    "make",
-    "design",
-    "write",
-    "draft",
-    "analyze",
-    "research",
-    "plan",
-    "fix",
-    "debug",
-    "schedule",
-    "send",
-    "email",
-    "image",
-    "img",
-  ];
-  return markers.some((m) => normalized.includes(m));
 }
 
 function deriveDaemonNameFromText(text: string): string {
@@ -910,19 +909,24 @@ async function interpretManagerIntent(text: string): Promise<ManagerIntent> {
 
   const daemons = listDaemons().map((d) => d.name).join(", ");
   const prompt = `You are an intent router for an orchestration manager.
-Return ONLY JSON matching one of:
-{"action":"chat","message":"string"}
-{"action":"start_daemon","name":"string","prompt":"string"}
-{"action":"daemon_command","daemonName":"string","command":"kill|pause|resume"}
-{"action":"status"}
-{"action":"kill_all"}
-{"action":"noop","reason":"string"}
+Return ONLY a JSON object with this shape:
+{
+  "task": boolean,
+  "action": "chat" | "start_daemon" | "daemon_command" | "status" | "kill_all" | "noop",
+  "message"?: string,
+  "name"?: string,
+  "prompt"?: string,
+  "daemonName"?: string,
+  "command"?: "kill" | "pause" | "resume",
+  "reason"?: string
+}
 
 Rules:
-- Casual conversation, greetings, thanks, and non-operational chat must return "chat" and never start daemons.
-- Only use "start_daemon" when the user clearly requests actual work execution.
-- If unclear whether to run work, prefer "chat" with a short clarifying question.
-- Requests like "create an image", "analyze this", "write/draft X", "build Y" are operational and should be "start_daemon".
+- "task" means: should this message create/continue executable work in a daemon?
+- If task=true, action MUST be "start_daemon" with "prompt" and "name".
+- If task=false, never use "start_daemon".
+- Casual conversation, greetings, thanks, and non-operational chat: task=false, action="chat".
+- If unclear, set task=false and ask a short clarifying chat message.
 
 Existing daemons: ${daemons || "(none)"}
 User message: ${text}`;
@@ -944,9 +948,59 @@ User message: ${text}`;
     }
     const parsed = parseIntentJson(raw);
     if (parsed) {
-      return parsed;
+      if (parsed.task) {
+        const promptText = (parsed.prompt ?? text).trim() || text;
+        const daemonName =
+          (parsed.name ?? deriveDaemonNameFromText(promptText)).trim() ||
+          deriveDaemonNameFromText(promptText);
+        return {
+          action: "start_daemon",
+          name: daemonName,
+          prompt: promptText,
+        };
+      }
+      switch (parsed.action) {
+        case "chat":
+          return {
+            action: "chat",
+            message:
+              typeof parsed.message === "string" && parsed.message.trim().length > 0
+                ? parsed.message
+                : "I can help with tasks. Tell me what you want me to create, analyze, or run.",
+          };
+        case "daemon_command":
+          if (
+            typeof parsed.daemonName === "string" &&
+            (parsed.command === "kill" ||
+              parsed.command === "pause" ||
+              parsed.command === "resume")
+          ) {
+            return {
+              action: "daemon_command",
+              daemonName: parsed.daemonName,
+              command: parsed.command,
+            };
+          }
+          return {
+            action: "chat",
+            message: "Tell me which daemon to control and what command to run.",
+          };
+        case "status":
+          return { action: "status" };
+        case "kill_all":
+          return { action: "kill_all" };
+        case "noop":
+          return { action: "noop", reason: parsed.reason ?? "No action needed." };
+        default:
+          return {
+            action: "chat",
+            message: "I can help with tasks. Tell me what you want me to create, analyze, or run.",
+          };
+      }
     }
-    if (isLikelyWorkRequest(text)) {
+
+    const fallbackTask = await fallbackTaskIntent(text);
+    if (fallbackTask) {
       return {
         action: "start_daemon",
         name: deriveDaemonNameFromText(text),
@@ -958,7 +1012,8 @@ User message: ${text}`;
       message: "I can help with tasks. Tell me what you want me to create, analyze, or run.",
     };
   } catch {
-    if (isLikelyWorkRequest(text)) {
+    const fallbackTask = await fallbackTaskIntent(text);
+    if (fallbackTask) {
       return {
         action: "start_daemon",
         name: deriveDaemonNameFromText(text),
@@ -969,6 +1024,39 @@ User message: ${text}`;
       action: "chat",
       message: "I can help with tasks. Tell me what you want me to create, analyze, or run.",
     };
+  }
+}
+
+async function fallbackTaskIntent(text: string): Promise<boolean> {
+  const prompt = `Classify if this message is an executable work request for an orchestration system.
+Return ONLY JSON: {"task": true} or {"task": false}
+
+Message:
+${text}`;
+
+  let raw = "";
+  try {
+    for await (const msg of query({
+      prompt,
+      options: {
+        model: "claude-sonnet-4-5",
+        allowedTools: [],
+        maxTurns: 1,
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      if (msg.type === "result" && "result" in msg) {
+        raw = (msg as { result: string }).result;
+      }
+    }
+
+    const trimmed = raw.trim();
+    const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
+    const parsed = JSON.parse(candidate) as { task?: unknown };
+    return parsed.task === true;
+  } catch {
+    return false;
   }
 }
 
@@ -1041,6 +1129,14 @@ export const handleManagerMessage = safe(async (ctx) => {
 
       if (!task) {
         await ctx.reply("The related task no longer exists.");
+        return;
+      }
+
+      const replyIntent = await fallbackTaskIntent(text);
+      if (!replyIntent) {
+        await ctx.reply(
+          "Understood. If you want me to run follow-up work, state it as a concrete request."
+        );
         return;
       }
 
@@ -1181,6 +1277,7 @@ export const handleManagerMessage = safe(async (ctx) => {
 
     const trigger = createCronTrigger({
       daemonName: parsedSchedule.daemonName,
+      chatId,
       title: parsedSchedule.title,
       prompt: parsedSchedule.prompt,
       cronExpr: parsedSchedule.cronExpr,

@@ -4,7 +4,7 @@ import { createLogger } from "../shared/logger.js";
 const log = createLogger("schema");
 
 /** Current schema version — bump when adding migrations */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS daemons (
@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS capabilities (
 CREATE TABLE IF NOT EXISTS cron_triggers (
   id              TEXT PRIMARY KEY,
   daemon_name     TEXT NOT NULL,
+  chat_id         TEXT,
   title           TEXT NOT NULL,
   prompt          TEXT NOT NULL,
   cron_expr       TEXT NOT NULL,
@@ -247,6 +248,9 @@ function applyMigrations(
   }
   if (fromVersion < 10) {
     migrateToV10(db);
+  }
+  if (fromVersion < 11) {
+    migrateToV11(db);
   }
 }
 
@@ -530,6 +534,36 @@ function migrateToV10(db: Database.Database): void {
   `);
 
   log.info("Migration to v10 complete");
+}
+
+function migrateToV11(db: Database.Database): void {
+  log.info("Applying migration to v11");
+
+  const cronCols = getColumnNames(db, "cron_triggers");
+  if (!cronCols.includes("chat_id")) {
+    db.exec(`ALTER TABLE cron_triggers ADD COLUMN chat_id TEXT`);
+    log.info("Added cron_triggers.chat_id column");
+  }
+
+  db.exec(`
+    UPDATE cron_triggers
+    SET chat_id = (
+      SELECT d.chat_id
+      FROM daemons d
+      WHERE d.name = cron_triggers.daemon_name
+        AND d.chat_id IS NOT NULL
+      LIMIT 1
+    )
+    WHERE (chat_id IS NULL OR chat_id = '')
+      AND EXISTS (
+        SELECT 1
+        FROM daemons d
+        WHERE d.name = cron_triggers.daemon_name
+          AND d.chat_id IS NOT NULL
+      )
+  `);
+
+  log.info("Migration to v11 complete");
 }
 
 function getColumnNames(
